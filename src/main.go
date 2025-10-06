@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -175,7 +176,7 @@ func stopCmd() *cobra.Command {
 				return err
 			}
 
-			// Collect commits
+			// Collect commits with repository name
 			var allCommits []string
 			for _, repo := range cfg.Repositories {
 				cmd := exec.Command(
@@ -193,13 +194,14 @@ func stopCmd() *cobra.Command {
 					return err
 				}
 				if len(out) > 0 {
-					allCommits = append(allCommits, string(out))
+					repoName := filepath.Base(repo) // get last part of path as repo name
+					// Prefix commits with repository name
+					allCommits = append(allCommits, fmt.Sprintf("Repository: %s\n%s", repoName, string(out)))
 				}
 			}
-			commitsText := ""
-			for _, c := range allCommits {
-				commitsText += c + "\n"
-			}
+
+			// Join all commits into a single string for AI prompt
+			commitsText := strings.Join(allCommits, "\n\n")
 
 			// Ask OpenAI
 			prompt := fmt.Sprintf("Summarize these git commits:\n\n%s", commitsText)
