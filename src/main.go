@@ -226,10 +226,23 @@ func openAISummarize(text string) (string, error) {
 	reqBody := map[string]interface{}{
 		"model": cfg.OpenAI.Model,
 		"messages": []map[string]string{
-			{"role": "system", "content": "You are a helpful assistant that summarizes git commits to a concise description used for time tracking in Toggl entry."},
-			{"role": "user", "content": text},
+			{
+				"role": "system",
+				"content": `You are an expert assistant that summarizes Git commits into concise, human-readable descriptions for Toggl time entries. 
+Always clearly state what work was done, in which repository/project, in 1-3 short sentences per repository. 
+Focus on actions taken, features implemented, bugs fixed, and avoid listing commit hashes.`,
+			},
+			{
+				"role": "user",
+				"content": `Here are the commits I made in my repositories:
+
+` + text + `
+
+Generate a concise summary suitable for a Toggl time entry.`,
+			},
 		},
 	}
+
 	buf, _ := json.Marshal(reqBody)
 	req, _ := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(buf))
 	req.Header.Set("Authorization", "Bearer "+cfg.OpenAI.APIKey)
