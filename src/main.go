@@ -200,11 +200,30 @@ func stopCmd() *cobra.Command {
 				}
 			}
 
+			// Read work log messages
+			tempDir := os.TempDir()
+			logFile := filepath.Join(tempDir, "toggl-worklog.txt")
+			var workLogText string
+
+			if logData, err := os.ReadFile(logFile); err == nil {
+				workLogText = string(logData)
+				// Clear the log file after reading
+				os.Remove(logFile)
+			}
+
 			// Join all commits into a single string for AI prompt
 			commitsText := strings.Join(allCommits, "\n\n")
 
+			// Combine commits and work log for AI prompt
+			var promptText string
+			if workLogText != "" {
+				promptText = fmt.Sprintf("Git commits:\n%s\n\nWork log:\n%s", commitsText, workLogText)
+			} else {
+				promptText = commitsText
+			}
+
 			// Ask OpenAI
-			prompt := fmt.Sprintf("Summarize these git commits:\n\n%s", commitsText)
+			prompt := fmt.Sprintf("Summarize these git commits and work log:\n\n%s", promptText)
 			summary, err := openAISummarize(prompt)
 			if err != nil {
 				return err
@@ -219,6 +238,39 @@ func stopCmd() *cobra.Command {
 			}
 
 			fmt.Println("Stopped tracking. Summary saved.")
+			return nil
+		},
+	}
+}
+
+func logCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "log [MESSAGE]",
+		Short: "Log a message for current work session",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			message := args[0]
+			timestamp := time.Now().Format(time.RFC3339)
+
+			// Create log entry with timestamp
+			logEntry := fmt.Sprintf("[%s] %s\n", timestamp, message)
+
+			// Get temp file path for logs
+			tempDir := os.TempDir()
+			logFile := filepath.Join(tempDir, "toggl-worklog.txt")
+
+			// Append to log file
+			file, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				return fmt.Errorf("failed to open log file: %v", err)
+			}
+			defer file.Close()
+
+			if _, err := file.WriteString(logEntry); err != nil {
+				return fmt.Errorf("failed to write to log file: %v", err)
+			}
+
+			fmt.Printf("Logged: %s\n", message)
 			return nil
 		},
 	}
@@ -278,7 +330,7 @@ func main() {
 	}
 
 	root := &cobra.Command{Use: "toggl"}
-	root.AddCommand(startCmd(), stopCmd(), whoamiCmd(), projectsCmd())
+	root.AddCommand(startCmd(), stopCmd(), logCmd(), whoamiCmd(), projectsCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Println("Error:", err)
 		os.Exit(1)
