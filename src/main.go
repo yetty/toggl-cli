@@ -44,8 +44,10 @@ type TogglTimeEntry struct {
 }
 
 var (
-	cfg     Config
-	cfgPath string
+	cfg           Config
+	cfgPath       string
+	togglBaseURL  = "https://api.track.toggl.com/api/v9/"
+	openAIBaseURL = "https://api.openai.com/v1/chat/completions"
 )
 
 func loadConfig() error {
@@ -59,7 +61,7 @@ func loadConfig() error {
 }
 
 func togglRequest(method, path string, body io.Reader) ([]byte, error) {
-	req, _ := http.NewRequest(method, "https://api.track.toggl.com/api/v9/"+path, body)
+	req, _ := http.NewRequest(method, togglBaseURL+path, body)
 	req.SetBasicAuth(cfg.Toggl.APIKey, "api_token")
 	req.Header.Set("Content-Type", "application/json")
 
@@ -308,7 +310,7 @@ Generate a concise summary suitable for a Toggl time entry.`,
 	}
 
 	buf, _ := json.Marshal(reqBody)
-	req, _ := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(buf))
+	req, _ := http.NewRequest("POST", openAIBaseURL, bytes.NewBuffer(buf))
 	req.Header.Set("Authorization", "Bearer "+cfg.OpenAI.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
