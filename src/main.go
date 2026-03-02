@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -207,8 +208,6 @@ func stopCmd() *cobra.Command {
 
 			if logData, err := os.ReadFile(logFile); err == nil {
 				workLogText = string(logData)
-				// Clear the log file after reading
-				os.Remove(logFile)
 			}
 
 			// Join all commits into a single string for AI prompt
@@ -226,7 +225,15 @@ func stopCmd() *cobra.Command {
 			prompt := fmt.Sprintf("Summarize these git commits and work log:\n\n%s", promptText)
 			summary, err := openAISummarize(prompt)
 			if err != nil {
-				return err
+				fmt.Printf("Error: %v\n", err)
+				fmt.Printf("\nCollected data:\n%s\n\n", promptText)
+				fmt.Print("AI summarization failed. Enter description manually (or press Enter to skip): ")
+				scanner := bufio.NewScanner(os.Stdin)
+				scanner.Scan()
+				summary = strings.TrimSpace(scanner.Text())
+				if summary == "" {
+					fmt.Println("Skipped description. Check your OpenAI API key in ~/.toggl.yaml")
+				}
 			}
 
 			// Update entry description
@@ -236,6 +243,9 @@ func stopCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// Clean up worklog after successful save
+			os.Remove(logFile)
 
 			fmt.Println("Stopped tracking. Summary saved.")
 			return nil
@@ -307,6 +317,9 @@ Generate a concise summary suitable for a Toggl time entry.`,
 		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("OpenAI API error: %s", resp.Status)
+	}
 	var result struct {
 		Choices []struct {
 			Message struct {
