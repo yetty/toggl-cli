@@ -4,6 +4,11 @@ BINARY_NAME = toggl
 CMD_PATH = ./src
 BUILD_DIR = ./bin
 
+GIT_COUNT := $(shell git rev-list --count HEAD)
+GIT_HASH  := $(shell git rev-parse --short HEAD)
+VERSION   := $(GIT_COUNT)-h$(GIT_HASH)
+LDFLAGS   := -ldflags "-X main.version=$(VERSION)"
+
 # Default: build local binary
 .PHONY: all
 all: build install
@@ -11,9 +16,9 @@ all: build install
 # Build local binary
 .PHONY: build
 build:
-	@echo "Building $(BINARY_NAME)..."
+	@echo "Building $(BINARY_NAME) $(VERSION)..."
 	@mkdir -p $(BUILD_DIR)
-	go build -o $(BUILD_DIR)/$(BINARY_NAME) $(CMD_PATH)
+	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) $(CMD_PATH)
 
 # Install to GOPATH/bin or GOBIN
 .PHONY: install
@@ -37,10 +42,10 @@ run:
 cross:
 	@echo "Building cross-platform binaries..."
 	mkdir -p $(BUILD_DIR)/release
-	GOOS=linux   GOARCH=amd64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-linux   $(CMD_PATH)
-	GOOS=darwin  GOARCH=amd64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-mac     $(CMD_PATH)
-	GOOS=darwin  GOARCH=arm64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-mac-arm $(CMD_PATH)
-	GOOS=windows GOARCH=amd64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME).exe    $(CMD_PATH)
+	GOOS=linux   GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/release/$(BINARY_NAME)-linux   $(CMD_PATH)
+	GOOS=darwin  GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/release/$(BINARY_NAME)-mac     $(CMD_PATH)
+	GOOS=darwin  GOARCH=arm64 go build $(LDFLAGS) -o $(BUILD_DIR)/release/$(BINARY_NAME)-mac-arm $(CMD_PATH)
+	GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/release/$(BINARY_NAME).exe    $(CMD_PATH)
 
 # Format Go code
 .PHONY: fmt

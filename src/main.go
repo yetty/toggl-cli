@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,10 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
+
+var version = "dev"
+
+// --- Types and constants ---
 
 type Config struct {
 	Toggl struct {
@@ -43,12 +48,22 @@ type TogglTimeEntry struct {
 	Description string    `json:"description"`
 }
 
+const worklogFile = "toggl-worklog.txt"
+
+const openAISystemPrompt = `You are an expert assistant that summarizes Git commits into concise, human-readable descriptions for Toggl time entries.
+Always clearly state what work was done, in which repository/project, in 1-3 short sentences per repository.
+Focus on actions taken, features implemented, bugs fixed, and avoid listing commit hashes.`
+
+// --- Global vars ---
+
 var (
 	cfg           Config
 	cfgPath       string
 	togglBaseURL  = "https://api.track.toggl.com/api/v9/"
 	openAIBaseURL = "https://api.openai.com/v1/chat/completions"
 )
+
+// --- Config loading ---
 
 func loadConfig() error {
 	usr, _ := user.Current()
@@ -59,6 +74,8 @@ func loadConfig() error {
 	}
 	return yaml.Unmarshal(data, &cfg)
 }
+
+// --- API clients ---
 
 func togglRequest(method, path string, body io.Reader) ([]byte, error) {
 	req, _ := http.NewRequest(method, togglBaseURL+path, body)
@@ -72,6 +89,153 @@ func togglRequest(method, path string, body io.Reader) ([]byte, error) {
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
 }
+
+func openAISummarize(text string) (string, error) {
+	reqBody := map[string]interface{}{
+		"model": cfg.OpenAI.Model,
+		"messages": []map[string]string{
+			{
+				"role":    "system",
+				"content": openAISystemPrompt,
+			},
+			{
+				"role": "user",
+				"content": `Here are the commits I made in my repositories:
+
+` + text + `
+
+Generate a concise summary suitable for a Toggl time entry.`,
+			},
+		},
+	}
+
+	buf, _ := json.Marshal(reqBody)
+	req, _ := http.NewRequest("POST", openAIBaseURL, bytes.NewBuffer(buf))
+	req.Header.Set("Authorization", "Bearer "+cfg.OpenAI.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("OpenAI API error: %s", resp.Status)
+	}
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("no completion returned")
+	}
+	return result.Choices[0].Message.Content, nil
+}
+
+// --- Helper functions ---
+
+func worklogPath() string {
+	return filepath.Join(os.TempDir(), worklogFile)
+}
+
+func getCurrentEntry() (TogglTimeEntry, error) {
+	data, err := togglRequest("GET", "me/time_entries/current", nil)
+	if err != nil {
+		return TogglTimeEntry{}, err
+	}
+	var entry TogglTimeEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		return TogglTimeEntry{}, err
+	}
+	if entry.ID == 0 {
+		return TogglTimeEntry{}, fmt.Errorf("no running timer")
+	}
+	return entry, nil
+}
+
+func stopEntry(entry *TogglTimeEntry) error {
+	entry.Stop = time.Now()
+	body, _ := json.Marshal(entry)
+	_, err := togglRequest("PUT", fmt.Sprintf("workspaces/%d/time_entries/%d", entry.Workspace, entry.ID), bytes.NewBuffer(body))
+	return err
+}
+
+func collectCommits(entry TogglTimeEntry) []string {
+	var allCommits []string
+	for _, repo := range cfg.Repositories {
+		cmd := exec.Command(
+			"git",
+			"-C", repo,
+			"log",
+			fmt.Sprintf("--since=%s", entry.Start.Format(time.RFC3339)),
+			fmt.Sprintf("--until=%s", entry.Stop.Format(time.RFC3339)),
+			fmt.Sprintf("--author=%s", cfg.Git.User),
+			"--pretty=format:%s",
+		)
+		out, err := cmd.Output()
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				fmt.Fprintf(os.Stderr, "Warning: skipping %s: %s\n", repo, strings.TrimSpace(string(exitErr.Stderr)))
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: skipping %s: %v\n", repo, err)
+			}
+			continue
+		}
+		if len(out) > 0 {
+			repoName := filepath.Base(repo)
+			allCommits = append(allCommits, fmt.Sprintf("Repository: %s\n%s", repoName, string(out)))
+		}
+	}
+	return allCommits
+}
+
+func readWorklog() string {
+	if data, err := os.ReadFile(worklogPath()); err == nil {
+		return string(data)
+	}
+	return ""
+}
+
+func buildPromptText(commits []string, worklog string) string {
+	commitsText := strings.Join(commits, "\n\n")
+	if worklog != "" {
+		return fmt.Sprintf("Git commits:\n%s\n\nWork log:\n%s", commitsText, worklog)
+	}
+	return commitsText
+}
+
+func getDescription(promptText string) string {
+	prompt := fmt.Sprintf("Summarize these git commits and work log:\n\n%s", promptText)
+	summary, err := openAISummarize(prompt)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		fmt.Printf("\nCollected data:\n%s\n\n", promptText)
+		fmt.Print("AI summarization failed. Enter description manually (or press Enter to skip): ")
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Scan()
+		summary = strings.TrimSpace(scanner.Text())
+		if summary == "" {
+			fmt.Println("Skipped description. Check your OpenAI API key in ~/.toggl.yaml")
+		}
+	}
+	return summary
+}
+
+func updateEntryDescription(entry TogglTimeEntry, description string) error {
+	entry.Description = description
+	body, _ := json.Marshal(entry)
+	_, err := togglRequest("PUT", fmt.Sprintf("workspaces/%d/time_entries/%d", entry.Workspace, entry.ID), bytes.NewBuffer(body))
+	return err
+}
+
+// --- Commands ---
 
 func whoamiCmd() *cobra.Command {
 	return &cobra.Command{
@@ -140,10 +304,22 @@ func startCmd() *cobra.Command {
 		Use:   "start",
 		Short: "Start Toggl tracker",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			body := fmt.Sprintf(`{"workspace_id":%d,"project_id":%d,"created_with":"toggl-cli","start":"%s","duration":-1}`,
-				cfg.Toggl.WorkspaceID, cfg.Toggl.ProjectID, time.Now().UTC().Format(time.RFC3339))
+			reqBody := struct {
+				WorkspaceID int    `json:"workspace_id"`
+				ProjectID   int    `json:"project_id"`
+				CreatedWith string `json:"created_with"`
+				Start       string `json:"start"`
+				Duration    int    `json:"duration"`
+			}{
+				WorkspaceID: cfg.Toggl.WorkspaceID,
+				ProjectID:   cfg.Toggl.ProjectID,
+				CreatedWith: "toggl-cli",
+				Start:       time.Now().UTC().Format(time.RFC3339),
+				Duration:    -1,
+			}
 
-			_, err := togglRequest("POST", fmt.Sprintf("workspaces/%d/time_entries", cfg.Toggl.WorkspaceID), bytes.NewBufferString(body))
+			body, _ := json.Marshal(reqBody)
+			_, err := togglRequest("POST", fmt.Sprintf("workspaces/%d/time_entries", cfg.Toggl.WorkspaceID), bytes.NewBuffer(body))
 			if err != nil {
 				return err
 			}
@@ -159,95 +335,25 @@ func stopCmd() *cobra.Command {
 		Use:   "stop",
 		Short: "Stop Toggl tracker and summarize commits",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Stop current timer
-			data, err := togglRequest("GET", "me/time_entries/current", nil)
-			if err != nil {
-				return err
-			}
-			var entry TogglTimeEntry
-			if err := json.Unmarshal(data, &entry); err != nil {
-				return err
-			}
-			if entry.ID == 0 {
-				return fmt.Errorf("no running timer")
-			}
-			entry.Stop = time.Now()
-
-			body, _ := json.Marshal(entry)
-			_, err = togglRequest("PUT", fmt.Sprintf("workspaces/%d/time_entries/%d", entry.Workspace, entry.ID), bytes.NewBuffer(body))
+			entry, err := getCurrentEntry()
 			if err != nil {
 				return err
 			}
 
-			// Collect commits with repository name
-			var allCommits []string
-			for _, repo := range cfg.Repositories {
-				cmd := exec.Command(
-					"git",
-					"-C", repo,
-					"log",
-					fmt.Sprintf("--since=%s", entry.Start.Format(time.RFC3339)),
-					fmt.Sprintf("--until=%s", entry.Stop.Format(time.RFC3339)),
-					fmt.Sprintf("--author=%s", cfg.Git.User),
-					"--pretty=format:%s",
-				)
-
-				out, err := cmd.Output()
-				if err != nil {
-					return err
-				}
-				if len(out) > 0 {
-					repoName := filepath.Base(repo) // get last part of path as repo name
-					// Prefix commits with repository name
-					allCommits = append(allCommits, fmt.Sprintf("Repository: %s\n%s", repoName, string(out)))
-				}
-			}
-
-			// Read work log messages
-			tempDir := os.TempDir()
-			logFile := filepath.Join(tempDir, "toggl-worklog.txt")
-			var workLogText string
-
-			if logData, err := os.ReadFile(logFile); err == nil {
-				workLogText = string(logData)
-			}
-
-			// Join all commits into a single string for AI prompt
-			commitsText := strings.Join(allCommits, "\n\n")
-
-			// Combine commits and work log for AI prompt
-			var promptText string
-			if workLogText != "" {
-				promptText = fmt.Sprintf("Git commits:\n%s\n\nWork log:\n%s", commitsText, workLogText)
-			} else {
-				promptText = commitsText
-			}
-
-			// Ask OpenAI
-			prompt := fmt.Sprintf("Summarize these git commits and work log:\n\n%s", promptText)
-			summary, err := openAISummarize(prompt)
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
-				fmt.Printf("\nCollected data:\n%s\n\n", promptText)
-				fmt.Print("AI summarization failed. Enter description manually (or press Enter to skip): ")
-				scanner := bufio.NewScanner(os.Stdin)
-				scanner.Scan()
-				summary = strings.TrimSpace(scanner.Text())
-				if summary == "" {
-					fmt.Println("Skipped description. Check your OpenAI API key in ~/.toggl.yaml")
-				}
-			}
-
-			// Update entry description
-			entry.Description = summary
-			body, _ = json.Marshal(entry)
-			_, err = togglRequest("PUT", fmt.Sprintf("workspaces/%d/time_entries/%d", entry.Workspace, entry.ID), bytes.NewBuffer(body))
-			if err != nil {
+			if err := stopEntry(&entry); err != nil {
 				return err
 			}
 
-			// Clean up worklog after successful save
-			os.Remove(logFile)
+			commits := collectCommits(entry)
+			worklog := readWorklog()
+			promptText := buildPromptText(commits, worklog)
+			description := getDescription(promptText)
+
+			if err := updateEntryDescription(entry, description); err != nil {
+				return err
+			}
+
+			os.Remove(worklogPath())
 
 			fmt.Println("Stopped tracking. Summary saved.")
 			return nil
@@ -263,16 +369,9 @@ func logCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			message := args[0]
 			timestamp := time.Now().Format(time.RFC3339)
-
-			// Create log entry with timestamp
 			logEntry := fmt.Sprintf("[%s] %s\n", timestamp, message)
 
-			// Get temp file path for logs
-			tempDir := os.TempDir()
-			logFile := filepath.Join(tempDir, "toggl-worklog.txt")
-
-			// Append to log file
-			file, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			file, err := os.OpenFile(worklogPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			if err != nil {
 				return fmt.Errorf("failed to open log file: %v", err)
 			}
@@ -288,55 +387,7 @@ func logCmd() *cobra.Command {
 	}
 }
 
-func openAISummarize(text string) (string, error) {
-	reqBody := map[string]interface{}{
-		"model": cfg.OpenAI.Model,
-		"messages": []map[string]string{
-			{
-				"role": "system",
-				"content": `You are an expert assistant that summarizes Git commits into concise, human-readable descriptions for Toggl time entries. 
-Always clearly state what work was done, in which repository/project, in 1-3 short sentences per repository. 
-Focus on actions taken, features implemented, bugs fixed, and avoid listing commit hashes.`,
-			},
-			{
-				"role": "user",
-				"content": `Here are the commits I made in my repositories:
-
-` + text + `
-
-Generate a concise summary suitable for a Toggl time entry.`,
-			},
-		},
-	}
-
-	buf, _ := json.Marshal(reqBody)
-	req, _ := http.NewRequest("POST", openAIBaseURL, bytes.NewBuffer(buf))
-	req.Header.Set("Authorization", "Bearer "+cfg.OpenAI.APIKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("OpenAI API error: %s", resp.Status)
-	}
-	var result struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-	if len(result.Choices) == 0 {
-		return "", fmt.Errorf("no completion returned")
-	}
-	return result.Choices[0].Message.Content, nil
-}
+// --- Main ---
 
 func main() {
 	if err := loadConfig(); err != nil {
@@ -344,7 +395,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	root := &cobra.Command{Use: "toggl"}
+	root := &cobra.Command{Use: "toggl", Version: version}
 	root.AddCommand(startCmd(), stopCmd(), logCmd(), whoamiCmd(), projectsCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Println("Error:", err)
