@@ -180,12 +180,19 @@ func collectCommits(entry TogglTimeEntry) []string {
 		)
 		out, err := cmd.Output()
 		if err != nil {
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				fmt.Fprintf(os.Stderr, "Warning: skipping %s: %s\n", repo, strings.TrimSpace(string(exitErr.Stderr)))
+			name := filepath.Base(repo)
+			var reason string
+			if _, statErr := os.Stat(repo); os.IsNotExist(statErr) {
+				reason = "path not found"
 			} else {
-				fmt.Fprintf(os.Stderr, "Warning: skipping %s: %v\n", repo, err)
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) && strings.Contains(string(exitErr.Stderr), "not a git repository") {
+					reason = "not a git repository"
+				} else {
+					reason = err.Error()
+				}
 			}
+			fmt.Fprintf(os.Stderr, "Warning: skipping %s (%s)\n", name, reason)
 			continue
 		}
 		if len(out) > 0 {
