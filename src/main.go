@@ -72,7 +72,13 @@ func loadConfig() error {
 	if err != nil {
 		return err
 	}
-	return yaml.Unmarshal(data, &cfg)
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return err
+	}
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		cfg.OpenAI.APIKey = key
+	}
+	return nil
 }
 
 // --- API clients ---
