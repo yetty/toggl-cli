@@ -12,6 +12,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `make cross` — cross-compile for Linux, macOS (Intel/ARM), Windows
 - `make clean` — remove build artifacts
 
+## Git Workflow
+
+- Make small, focused commits regularly as work progresses.
+- Keep each commit scoped to one coherent change and verify relevant tests before committing.
+- Do not bundle unrelated cleanup with feature or bug-fix commits.
+
 ## Architecture
 
 Single-file Go CLI (`src/main.go`, ~340 LOC) built with Cobra. All commands, types, and helpers live in one `main` package.

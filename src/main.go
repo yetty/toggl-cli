@@ -8,10 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,6 +37,12 @@ type Config struct {
 	Git struct {
 		User string `yaml:"user"`
 	} `yaml:"git"`
+	Repositories []string                 `yaml:"repositories"`
+	Projects     map[string]ProjectConfig `yaml:"projects"`
+}
+
+type ProjectConfig struct {
+	ProjectID    int      `yaml:"project_id"`
 	Repositories []string `yaml:"repositories"`
 }
 
@@ -48,7 +55,26 @@ type TogglTimeEntry struct {
 	Description string    `json:"description"`
 }
 
+type ProjectCommit struct {
+	ProjectName string
+	ProjectID   int
+	RepoName    string
+	RepoPath    string
+	Subject     string
+	Time        time.Time
+}
+
+type ProjectSplit struct {
+	ProjectName string
+	ProjectID   int
+	Start       time.Time
+	Stop        time.Time
+	Duration    time.Duration
+}
+
 const worklogFile = "toggl-worklog.txt"
+
+const badSummaryText = "Sure! Please provide the details of your commits so I can generate a concise summary for you."
 
 const openAISystemPrompt = `You are an expert assistant that summarizes Git commits into concise, human-readable descriptions for Toggl time entries.
 Always clearly state what work was done, in which repository/project, in 1-3 short sentences per repository.
@@ -61,13 +87,17 @@ var (
 	cfgPath       string
 	togglBaseURL  = "https://api.track.toggl.com/api/v9/"
 	openAIBaseURL = "https://api.openai.com/v1/chat/completions"
+	nowFunc       = time.Now
 )
 
 // --- Config loading ---
 
 func loadConfig() error {
-	usr, _ := user.Current()
-	cfgPath = filepath.Join(usr.HomeDir, ".toggl.yaml")
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	cfgPath = filepath.Join(homeDir, ".toggl.yaml")
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return err
@@ -94,6 +124,26 @@ func togglRequest(method, path string, body io.Reader) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
+}
+
+func togglRequestChecked(method, path string, body io.Reader) ([]byte, error) {
+	req, _ := http.NewRequest(method, togglBaseURL+path, body)
+	req.SetBasicAuth(cfg.Toggl.APIKey, "api_token")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("Toggl API error: %s", resp.Status)
+	}
+	return data, nil
 }
 
 func openAISummarize(text string) (string, error) {
@@ -150,6 +200,20 @@ func worklogPath() string {
 	return filepath.Join(os.TempDir(), worklogFile)
 }
 
+func expandRepoPath(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, strings.TrimPrefix(path, "~/"))
+}
+
 func getCurrentEntry() (TogglTimeEntry, error) {
 	data, err := togglRequest("GET", "me/time_entries/current", nil)
 	if err != nil {
@@ -166,15 +230,40 @@ func getCurrentEntry() (TogglTimeEntry, error) {
 }
 
 func stopEntry(entry *TogglTimeEntry) error {
-	entry.Stop = time.Now()
+	entry.Stop = nowFunc()
 	body, _ := json.Marshal(entry)
-	_, err := togglRequest("PUT", fmt.Sprintf("workspaces/%d/time_entries/%d", entry.Workspace, entry.ID), bytes.NewBuffer(body))
+	_, err := togglRequestChecked("PUT", fmt.Sprintf("workspaces/%d/time_entries/%d", entry.Workspace, entry.ID), bytes.NewBuffer(body))
+	return err
+}
+
+func createTimeEntry(split ProjectSplit, description string, workspaceID int) error {
+	reqBody := struct {
+		WorkspaceID int    `json:"workspace_id"`
+		ProjectID   int    `json:"project_id"`
+		Description string `json:"description"`
+		CreatedWith string `json:"created_with"`
+		Start       string `json:"start"`
+		Stop        string `json:"stop"`
+		Duration    int    `json:"duration"`
+	}{
+		WorkspaceID: workspaceID,
+		ProjectID:   split.ProjectID,
+		Description: description,
+		CreatedWith: "toggl-cli",
+		Start:       split.Start.Format(time.RFC3339),
+		Stop:        split.Stop.Format(time.RFC3339),
+		Duration:    int(split.Duration.Seconds()),
+	}
+
+	body, _ := json.Marshal(reqBody)
+	_, err := togglRequestChecked("POST", fmt.Sprintf("workspaces/%d/time_entries", workspaceID), bytes.NewBuffer(body))
 	return err
 }
 
 func collectCommits(entry TogglTimeEntry) []string {
 	var allCommits []string
-	for _, repo := range cfg.Repositories {
+	for _, repoPath := range cfg.Repositories {
+		repo := expandRepoPath(repoPath)
 		cmd := exec.Command(
 			"git",
 			"-C", repo,
@@ -209,6 +298,164 @@ func collectCommits(entry TogglTimeEntry) []string {
 	return allCommits
 }
 
+func collectProjectCommits(entry TogglTimeEntry) []ProjectCommit {
+	var commits []ProjectCommit
+	projectNames := make([]string, 0, len(cfg.Projects))
+	for projectName := range cfg.Projects {
+		projectNames = append(projectNames, projectName)
+	}
+	sort.Strings(projectNames)
+
+	for _, projectName := range projectNames {
+		project := cfg.Projects[projectName]
+		for _, repoPath := range project.Repositories {
+			repo := expandRepoPath(repoPath)
+			cmd := exec.Command(
+				"git",
+				"-C", repo,
+				"log",
+				fmt.Sprintf("--since=%s", entry.Start.Format(time.RFC3339)),
+				fmt.Sprintf("--until=%s", entry.Stop.Format(time.RFC3339)),
+				fmt.Sprintf("--author=%s", cfg.Git.User),
+				"--pretty=format:%cI%x09%s",
+			)
+			out, err := cmd.Output()
+			if err != nil {
+				name := filepath.Base(repo)
+				var reason string
+				if _, statErr := os.Stat(repo); os.IsNotExist(statErr) {
+					reason = "path not found"
+				} else {
+					var exitErr *exec.ExitError
+					if errors.As(err, &exitErr) && strings.Contains(string(exitErr.Stderr), "not a git repository") {
+						reason = "not a git repository"
+					} else {
+						reason = err.Error()
+					}
+				}
+				fmt.Fprintf(os.Stderr, "Warning: skipping %s (%s)\n", name, reason)
+				continue
+			}
+
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if line == "" {
+					continue
+				}
+				parts := strings.SplitN(line, "\t", 2)
+				if len(parts) != 2 {
+					fmt.Fprintf(os.Stderr, "Warning: skipping malformed git log line in %s: %s\n", filepath.Base(repo), line)
+					continue
+				}
+				commitTime, err := time.Parse(time.RFC3339, parts[0])
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: skipping commit with malformed timestamp in %s: %s\n", filepath.Base(repo), parts[0])
+					continue
+				}
+				commits = append(commits, ProjectCommit{
+					ProjectName: projectName,
+					ProjectID:   project.ProjectID,
+					RepoName:    filepath.Base(repo),
+					RepoPath:    repo,
+					Subject:     parts[1],
+					Time:        commitTime,
+				})
+			}
+		}
+	}
+	sort.Slice(commits, func(i, j int) bool {
+		if !commits[i].Time.Equal(commits[j].Time) {
+			return commits[i].Time.Before(commits[j].Time)
+		}
+		if commits[i].ProjectName != commits[j].ProjectName {
+			return commits[i].ProjectName < commits[j].ProjectName
+		}
+		if commits[i].ProjectID != commits[j].ProjectID {
+			return commits[i].ProjectID < commits[j].ProjectID
+		}
+		if commits[i].RepoName != commits[j].RepoName {
+			return commits[i].RepoName < commits[j].RepoName
+		}
+		return commits[i].Subject < commits[j].Subject
+	})
+	return commits
+}
+
+func formatProjectCommits(commits []ProjectCommit) []string {
+	formatted := make([]string, 0, len(commits))
+	for _, commit := range commits {
+		formatted = append(formatted, fmt.Sprintf("Project: %s\nRepository: %s\n%s", commit.ProjectName, commit.RepoName, commit.Subject))
+	}
+	return formatted
+}
+
+func calculateProjectSplits(entry TogglTimeEntry, commits []ProjectCommit) []ProjectSplit {
+	if len(commits) == 0 {
+		return nil
+	}
+
+	sortedCommits := append([]ProjectCommit(nil), commits...)
+	sort.SliceStable(sortedCommits, func(i, j int) bool {
+		if !sortedCommits[i].Time.Equal(sortedCommits[j].Time) {
+			return sortedCommits[i].Time.Before(sortedCommits[j].Time)
+		}
+		if sortedCommits[i].ProjectName != sortedCommits[j].ProjectName {
+			return sortedCommits[i].ProjectName < sortedCommits[j].ProjectName
+		}
+		if sortedCommits[i].ProjectID != sortedCommits[j].ProjectID {
+			return sortedCommits[i].ProjectID < sortedCommits[j].ProjectID
+		}
+		if sortedCommits[i].RepoName != sortedCommits[j].RepoName {
+			return sortedCommits[i].RepoName < sortedCommits[j].RepoName
+		}
+		return sortedCommits[i].Subject < sortedCommits[j].Subject
+	})
+
+	type projectKey struct {
+		ProjectName string
+		ProjectID   int
+	}
+
+	projectOrder := make([]projectKey, 0, len(sortedCommits))
+	durations := map[projectKey]time.Duration{}
+	seen := map[projectKey]bool{}
+	for i, commit := range sortedCommits {
+		key := projectKey{ProjectName: commit.ProjectName, ProjectID: commit.ProjectID}
+		if !seen[key] {
+			seen[key] = true
+			projectOrder = append(projectOrder, key)
+		}
+
+		start := entry.Start
+		if i > 0 {
+			previous := sortedCommits[i-1]
+			start = previous.Time.Add(commit.Time.Sub(previous.Time) / 2)
+		}
+		stop := entry.Stop
+		if i < len(sortedCommits)-1 {
+			next := sortedCommits[i+1]
+			stop = commit.Time.Add(next.Time.Sub(commit.Time) / 2)
+		}
+		durations[key] += stop.Sub(start)
+	}
+
+	splits := make([]ProjectSplit, 0, len(projectOrder))
+	start := entry.Start
+	for _, project := range projectOrder {
+		stop := start.Add(durations[project])
+		splits = append(splits, ProjectSplit{
+			ProjectName: project.ProjectName,
+			ProjectID:   project.ProjectID,
+			Start:       start,
+			Stop:        stop,
+			Duration:    stop.Sub(start),
+		})
+		start = stop
+	}
+	splits[len(splits)-1].Stop = entry.Stop
+	splits[len(splits)-1].Duration = entry.Stop.Sub(splits[len(splits)-1].Start)
+	return splits
+}
+
 func readWorklog() string {
 	if data, err := os.ReadFile(worklogPath()); err == nil {
 		return string(data)
@@ -217,23 +464,38 @@ func readWorklog() string {
 }
 
 func buildPromptText(commits []string, worklog string) string {
-	commitsText := strings.Join(commits, "\n\n")
-	if worklog != "" {
-		return fmt.Sprintf("Git commits:\n%s\n\nWork log:\n%s", commitsText, worklog)
+	var sections []string
+	if len(commits) > 0 {
+		sections = append(sections, fmt.Sprintf("Git commits:\n%s", strings.Join(commits, "\n\n")))
 	}
-	return commitsText
+	if strings.TrimSpace(worklog) != "" {
+		sections = append(sections, fmt.Sprintf("Work log:\n%s", strings.TrimSpace(worklog)))
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func promptManualDescription(prompt string) string {
+	fmt.Print(prompt)
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	summary := strings.TrimSpace(scanner.Text())
+	if summary == "" {
+		fmt.Println("Skipped description.")
+	}
+	return summary
 }
 
 func getDescription(promptText string) string {
+	if strings.TrimSpace(promptText) == "" {
+		return promptManualDescription("No commits or work log entries found. Enter description manually (or press Enter to skip): ")
+	}
+
 	prompt := fmt.Sprintf("Summarize these git commits and work log:\n\n%s", promptText)
 	summary, err := openAISummarize(prompt)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		fmt.Printf("\nCollected data:\n%s\n\n", promptText)
-		fmt.Print("AI summarization failed. Enter description manually (or press Enter to skip): ")
-		scanner := bufio.NewScanner(os.Stdin)
-		scanner.Scan()
-		summary = strings.TrimSpace(scanner.Text())
+		summary = promptManualDescription("AI summarization failed. Enter description manually (or press Enter to skip): ")
 		if summary == "" {
 			fmt.Println("Skipped description. Check your OpenAI API key in ~/.toggl.yaml")
 		}
@@ -241,11 +503,70 @@ func getDescription(promptText string) string {
 	return summary
 }
 
+func isBadSummary(description string) bool {
+	description = strings.TrimSpace(description)
+	if description == badSummaryText {
+		return true
+	}
+	return description == "Sure! Please provide the details of your commits so I can generate a summary for your Toggl time entry."
+}
+
 func updateEntryDescription(entry TogglTimeEntry, description string) error {
 	entry.Description = description
+	workspaceID := entry.Workspace
+	if workspaceID == 0 {
+		workspaceID = cfg.Toggl.WorkspaceID
+	}
 	body, _ := json.Marshal(entry)
-	_, err := togglRequest("PUT", fmt.Sprintf("workspaces/%d/time_entries/%d", entry.Workspace, entry.ID), bytes.NewBuffer(body))
+	_, err := togglRequestChecked("PUT", fmt.Sprintf("workspaces/%d/time_entries/%d", workspaceID, entry.ID), bytes.NewBuffer(body))
 	return err
+}
+
+func applyProjectSplits(entry TogglTimeEntry, splits []ProjectSplit, description string) error {
+	if len(splits) == 0 {
+		return updateEntryDescription(entry, description)
+	}
+	workspaceID := entry.Workspace
+	if workspaceID == 0 {
+		workspaceID = cfg.Toggl.WorkspaceID
+	}
+
+	first := splits[0]
+	entry.Project = first.ProjectID
+	entry.Start = first.Start
+	entry.Stop = first.Stop
+	entry.Description = description
+	if err := updateEntryDescription(entry, description); err != nil {
+		return fmt.Errorf("original split update failed for project %s (%d): %w", first.ProjectName, first.ProjectID, err)
+	}
+
+	for _, split := range splits[1:] {
+		if err := createTimeEntry(split, description, workspaceID); err != nil {
+			return fmt.Errorf("split creation failed for project %s (%d): %w", split.ProjectName, split.ProjectID, err)
+		}
+	}
+	return nil
+}
+
+func printProjectSplitSummary(splits []ProjectSplit) {
+	fmt.Println("Stopped tracking. Split into:")
+	for _, split := range splits {
+		fmt.Printf("- %s: %s\n", split.ProjectName, split.Duration)
+	}
+	fmt.Println("Summary saved.")
+}
+
+func listTimeEntries(start, end string) ([]TogglTimeEntry, error) {
+	path := fmt.Sprintf("me/time_entries?start_date=%s&end_date=%s", url.QueryEscape(start), url.QueryEscape(end))
+	data, err := togglRequest("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var entries []TogglTimeEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 // --- Commands ---
@@ -358,9 +679,31 @@ func stopCmd() *cobra.Command {
 			}
 
 			commits := collectCommits(entry)
+			var projectCommits []ProjectCommit
+			if len(cfg.Projects) > 0 {
+				projectCommits = collectProjectCommits(entry)
+				commits = append(commits, formatProjectCommits(projectCommits)...)
+			}
 			worklog := readWorklog()
 			promptText := buildPromptText(commits, worklog)
 			description := getDescription(promptText)
+			if description == "" {
+				os.Remove(worklogPath())
+				fmt.Println("Stopped tracking. No summary saved.")
+				return nil
+			}
+
+			if len(cfg.Projects) > 0 {
+				splits := calculateProjectSplits(entry, projectCommits)
+				if len(splits) > 0 {
+					if err := applyProjectSplits(entry, splits, description); err != nil {
+						return err
+					}
+					os.Remove(worklogPath())
+					printProjectSplitSummary(splits)
+					return nil
+				}
+			}
 
 			if err := updateEntryDescription(entry, description); err != nil {
 				return err
@@ -372,6 +715,51 @@ func stopCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func repairSummariesCmd() *cobra.Command {
+	var startDate, endDate string
+	cmd := &cobra.Command{
+		Use:   "repair-summaries",
+		Short: "Repair Toggl entries saved with the empty-commit AI response",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if startDate == "" || endDate == "" {
+				return fmt.Errorf("--start and --end are required")
+			}
+
+			entries, err := listTimeEntries(startDate, endDate)
+			if err != nil {
+				return err
+			}
+
+			repaired := 0
+			for _, entry := range entries {
+				if !isBadSummary(entry.Description) {
+					continue
+				}
+
+				fmt.Printf("Repairing entry %d (%s - %s)\n", entry.ID, entry.Start.Format(time.RFC3339), entry.Stop.Format(time.RFC3339))
+				commits := collectCommits(entry)
+				promptText := buildPromptText(commits, "")
+				description := getDescription(promptText)
+				if description == "" {
+					fmt.Printf("Skipped entry %d.\n", entry.ID)
+					continue
+				}
+
+				if err := updateEntryDescription(entry, description); err != nil {
+					return err
+				}
+				repaired++
+			}
+
+			fmt.Printf("Repaired %d entries.\n", repaired)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&startDate, "start", "", "start date/time to scan (RFC3339)")
+	cmd.Flags().StringVar(&endDate, "end", "", "end date/time to scan (RFC3339)")
+	return cmd
 }
 
 func logCmd() *cobra.Command {
@@ -409,7 +797,7 @@ func main() {
 	}
 
 	root := &cobra.Command{Use: "toggl", Version: version}
-	root.AddCommand(startCmd(), stopCmd(), logCmd(), whoamiCmd(), projectsCmd())
+	root.AddCommand(startCmd(), stopCmd(), logCmd(), whoamiCmd(), projectsCmd(), repairSummariesCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Println("Error:", err)
 		os.Exit(1)

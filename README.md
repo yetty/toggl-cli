@@ -80,12 +80,23 @@ git:
 repositories:
   - "/path/to/repo1"
   - "/path/to/repo2"
+
+projects:
+  cortex:
+    project_id: 204198137
+    repositories:
+      - "~/Projects/lkq/cortex"
+  voicesense:
+    project_id: 204198138
+    repositories:
+      - "~/Projects/lkq/voicesense"
 ```
 
 * **Toggl**: provide your API token, workspace ID, and default project ID.
 * **OpenAI**: provide your API key and model name.
 * **Git**: only commits authored by this user will be summarized.
-* **Repositories**: paths to Git repositories to scan for commits.
+* **Projects**: optional map of project names to Toggl project IDs and Git repositories. When project commits are detected during `toggl stop`, the CLI can split one stopped timer into multiple project-specific Toggl entries with contiguous time ranges.
+* **Repositories**: legacy list of Git repositories to scan for commits. This still works for summary-only behavior when `projects:` is not configured or no project commits are detected.
 
 ---
 
