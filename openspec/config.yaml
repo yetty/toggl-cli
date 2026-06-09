@@ -1,20 +1,51 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# OpenSpec-specific guidance only.
+# General project overview, architecture, commands, build/test commands, and git
+# workflow live in README.md and AGENTS.md and should not be duplicated here.
+context: |
+  Use README.md for user-facing behavior and AGENTS.md for implementation workflow.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  When creating or updating OpenSpec artifacts for this project:
+    - Focus on observable CLI behavior, configuration compatibility, and integration side effects.
+    - Prefer small, behavior-centered changes over broad implementation restructuring.
+    - Treat existing specs as the source of truth for current requirements.
+    - Keep examples free of real tokens, personal data, and machine-specific paths.
+    - Be explicit about behavior that affects external systems, especially Toggl entries,
+      OpenAI-generated descriptions, local git inspection, and temporary worklog recovery.
+    - Preserve backward compatibility unless a proposal explicitly justifies breaking it.
+
+rules:
+  proposal:
+    - Keep proposals focused on one coherent user-visible behavior change.
+    - Include a short "Why" section explaining the problem or opportunity.
+    - Include a "Non-goals" section for tempting but intentionally excluded work.
+    - Name the affected CLI command or workflow without re-documenting all existing commands.
+    - Do not include implementation detail unless it is necessary to explain scope or risk.
+
+  design:
+    - Create a design only when a change has meaningful tradeoffs, cross-integration effects, or non-obvious failure modes.
+    - Describe data flow changes only for the affected workflow.
+    - Include failure and recovery behavior when a change can partially succeed.
+    - Call out compatibility decisions for existing configuration and stored temporary state.
+    - Avoid restating architecture already covered by AGENTS.md.
+
+  spec:
+    - Replace placeholder purposes; never leave `Purpose` as `TBD`.
+    - Write requirements using SHALL language.
+    - Use concrete `WHEN` / `THEN` scenarios.
+    - Specify user-visible output or error text only when it is part of the required behavior.
+    - Include compatibility scenarios when configuration behavior changes.
+    - Include edge cases for empty inputs, missing state, failed external calls, and retry/recovery paths when relevant.
+    - Keep requirements focused on behavior, not internal function names.
+
+  tasks:
+    - Break work into small implementation steps that can be verified independently.
+    - Include targeted verification for changed behavior.
+    - Include spec/documentation update tasks when user-facing behavior changes.
+    - Avoid unrelated cleanup tasks.
+
+  archive:
+    - Ensure affected specs describe final implemented behavior, not proposal intent.
+    - Ensure every affected spec has a meaningful Purpose.
+    - Remove stale assumptions discovered during implementation.
