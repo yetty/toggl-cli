@@ -3,6 +3,7 @@
 BINARY_NAME = toggl
 CMD_PATH = ./src
 BUILD_DIR = ./bin
+INSTALL_DIR = $(HOME)/.local/bin
 
 GIT_COUNT := $(shell git rev-list --count HEAD)
 GIT_HASH  := $(shell git rev-parse --short HEAD)
@@ -20,11 +21,12 @@ build:
 	@mkdir -p $(BUILD_DIR)
 	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) $(CMD_PATH)
 
-# Install to GOPATH/bin or GOBIN
+# Install to user-local bin directory
 .PHONY: install
-install:
-	@echo "Installing $(BINARY_NAME)..."
-	sudo cp $(BUILD_DIR)/$(BINARY_NAME) /usr/local/bin/$(BINARY_NAME)
+install: build
+	@echo "Installing $(BINARY_NAME) to $(INSTALL_DIR)..."
+	@mkdir -p $(INSTALL_DIR)
+	cp $(BUILD_DIR)/$(BINARY_NAME) $(INSTALL_DIR)/$(BINARY_NAME)
 
 # Clean build artifacts
 .PHONY: clean

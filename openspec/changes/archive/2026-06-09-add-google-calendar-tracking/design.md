@@ -50,8 +50,9 @@ The CLI currently loads a single YAML config, starts/stops Toggl time entries, a
    - Alternative considered: include calendar context in AI summaries. Rejected as out of scope and not required for on-track feedback.
 
 7. **Investigate the simplest non-OAuth calendar access path before implementation.**
-   - Preferred directions are a shareable calendar/feed or service-account access to a shared calendar; avoid an OAuth desktop flow unless simpler options fail.
-   - Rationale: the user can share the calendar and wants the simplest setup without OAuth.
+   - Use Google Calendar API key access to a calendar that is public/shareable enough for read-only API-key reads.
+   - Rationale: the user can share the calendar and wants the simplest setup without OAuth. API-key access uses the Calendar `events` endpoint directly and can return expanded timed event instances for a month with no OAuth token exchange.
+   - Service-account access was considered and remains viable for private calendars, but it requires Google Cloud service-account creation, sharing the calendar with the service-account email, signed JWT/OAuth token exchange, and more credential handling in the CLI.
    - Alternative considered: implement OAuth user login first. Rejected as unnecessarily complex until the non-OAuth options are ruled out.
 
 ## Risks / Trade-offs

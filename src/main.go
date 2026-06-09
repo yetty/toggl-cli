@@ -39,6 +39,19 @@ type Config struct {
 	} `yaml:"git"`
 	Repositories []string                 `yaml:"repositories"`
 	Projects     map[string]ProjectConfig `yaml:"projects"`
+	Calendar     CalendarConfig           `yaml:"calendar"`
+}
+
+type CalendarConfig struct {
+	ID                string   `yaml:"id"`
+	APIKey            string   `yaml:"api_key"`
+	EventNames        []string `yaml:"event_names"`
+	MonthlyHourBudget float64  `yaml:"monthly_hour_budget"`
+	ProjectIDs        []int    `yaml:"project_ids"`
+}
+
+func (c CalendarConfig) Enabled() bool {
+	return c.ID != "" && c.APIKey != "" && len(c.EventNames) > 0 && c.MonthlyHourBudget > 0
 }
 
 type ProjectConfig struct {
@@ -74,6 +87,45 @@ type ProjectSplit struct {
 	Duration    time.Duration
 }
 
+type CalendarEvent struct {
+	Summary string
+	Start   time.Time
+	End     time.Time
+}
+
+func (e CalendarEvent) Duration() time.Duration {
+	if e.End.Before(e.Start) {
+		return 0
+	}
+	return e.End.Sub(e.Start)
+}
+
+type WorkloadStatus struct {
+	Worked            time.Duration
+	Planned           time.Duration
+	ElapsedPlanned    time.Duration
+	TodayPlanned      time.Duration
+	FuturePlanned     time.Duration
+	RemainingRequired time.Duration
+	RecommendedToday  time.Duration
+	MonthlyHourBudget float64
+}
+
+type googleCalendarDateTime struct {
+	DateTime string `json:"dateTime"`
+	Date     string `json:"date"`
+}
+
+type googleCalendarEvent struct {
+	Summary string                 `json:"summary"`
+	Start   googleCalendarDateTime `json:"start"`
+	End     googleCalendarDateTime `json:"end"`
+}
+
+type googleCalendarEventsResponse struct {
+	Items []googleCalendarEvent `json:"items"`
+}
+
 const worklogFile = "toggl-worklog.txt"
 
 const badSummaryText = "Sure! Please provide the details of your commits so I can generate a concise summary for you."
@@ -85,11 +137,12 @@ No Markdown, no bullets, no headings, no repository list, and no commit hashes.`
 // --- Global vars ---
 
 var (
-	cfg           Config
-	cfgPath       string
-	togglBaseURL  = "https://api.track.toggl.com/api/v9/"
-	openAIBaseURL = "https://api.openai.com/v1/chat/completions"
-	nowFunc       = time.Now
+	cfg             Config
+	cfgPath         string
+	togglBaseURL    = "https://api.track.toggl.com/api/v9/"
+	openAIBaseURL   = "https://api.openai.com/v1/chat/completions"
+	calendarBaseURL = "https://www.googleapis.com/calendar/v3/"
+	nowFunc         = time.Now
 )
 
 // --- Config loading ---
@@ -214,6 +267,193 @@ func expandRepoPath(path string) string {
 		return home
 	}
 	return filepath.Join(home, strings.TrimPrefix(path, "~/"))
+}
+
+func currentMonthBounds(now time.Time) (time.Time, time.Time) {
+	loc := now.Location()
+	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
+	return start, start.AddDate(0, 1, 0)
+}
+
+func currentDayBounds(now time.Time) (time.Time, time.Time) {
+	loc := now.Location()
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	return start, start.AddDate(0, 0, 1)
+}
+
+func configuredCalendarProjectIDs() []int {
+	if len(cfg.Calendar.ProjectIDs) > 0 {
+		return cfg.Calendar.ProjectIDs
+	}
+	ids := map[int]bool{}
+	if cfg.Toggl.ProjectID != 0 {
+		ids[cfg.Toggl.ProjectID] = true
+	}
+	for _, project := range cfg.Projects {
+		if project.ProjectID != 0 {
+			ids[project.ProjectID] = true
+		}
+	}
+	result := make([]int, 0, len(ids))
+	for id := range ids {
+		result = append(result, id)
+	}
+	sort.Ints(result)
+	return result
+}
+
+func parseCalendarDateTime(value string, loc *time.Location) (time.Time, error) {
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return parsed.In(loc), nil
+}
+
+func filterMatchingTimedEvents(items []googleCalendarEvent, eventNames []string, loc *time.Location) ([]CalendarEvent, error) {
+	allowed := map[string]bool{}
+	for _, name := range eventNames {
+		allowed[name] = true
+	}
+
+	events := make([]CalendarEvent, 0, len(items))
+	for _, item := range items {
+		if !allowed[item.Summary] || item.Start.DateTime == "" || item.End.DateTime == "" {
+			continue
+		}
+		start, err := parseCalendarDateTime(item.Start.DateTime, loc)
+		if err != nil {
+			return nil, err
+		}
+		end, err := parseCalendarDateTime(item.End.DateTime, loc)
+		if err != nil {
+			return nil, err
+		}
+		if !end.After(start) {
+			continue
+		}
+		events = append(events, CalendarEvent{Summary: item.Summary, Start: start, End: end})
+	}
+	return events, nil
+}
+
+func fetchCalendarEvents(start, end time.Time) ([]CalendarEvent, error) {
+	params := url.Values{}
+	params.Set("key", cfg.Calendar.APIKey)
+	params.Set("timeMin", start.Format(time.RFC3339))
+	params.Set("timeMax", end.Format(time.RFC3339))
+	params.Set("singleEvents", "true")
+	params.Set("orderBy", "startTime")
+	path := fmt.Sprintf("calendars/%s/events?%s", url.PathEscape(cfg.Calendar.ID), params.Encode())
+	req, err := http.NewRequest("GET", calendarBaseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("Google Calendar API error: %s", resp.Status)
+	}
+	var result googleCalendarEventsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return filterMatchingTimedEvents(result.Items, cfg.Calendar.EventNames, start.Location())
+}
+
+func fetchWorkedDuration(start, end time.Time, projectIDs []int) (time.Duration, error) {
+	entries, err := listTimeEntries(start.Format(time.RFC3339), end.Format(time.RFC3339))
+	if err != nil {
+		return 0, err
+	}
+	allowed := map[int]bool{}
+	for _, id := range projectIDs {
+		allowed[id] = true
+	}
+	var total time.Duration
+	for _, entry := range entries {
+		if !allowed[entry.Project] || entry.Stop.IsZero() || !entry.Stop.After(entry.Start) {
+			continue
+		}
+		total += entry.Stop.Sub(entry.Start)
+	}
+	return total, nil
+}
+
+func calculateWorkloadStatus(monthlyHourBudget float64, worked time.Duration, events []CalendarEvent, now time.Time) WorkloadStatus {
+	dayStart, dayEnd := currentDayBounds(now)
+	budget := time.Duration(monthlyHourBudget * float64(time.Hour))
+	status := WorkloadStatus{Worked: worked, MonthlyHourBudget: monthlyHourBudget}
+	for _, event := range events {
+		duration := event.Duration()
+		status.Planned += duration
+		if event.End.After(dayStart) && event.Start.Before(dayEnd) {
+			status.TodayPlanned += duration
+		} else if !event.Start.Before(dayEnd) {
+			status.FuturePlanned += duration
+		} else {
+			status.ElapsedPlanned += duration
+		}
+	}
+	status.RemainingRequired = budget - worked
+	if status.RemainingRequired < 0 {
+		status.RemainingRequired = 0
+	}
+	status.RecommendedToday = status.RemainingRequired - status.FuturePlanned
+	if status.RecommendedToday < 0 {
+		status.RecommendedToday = 0
+	}
+	return status
+}
+
+func loadWorkloadStatus() (WorkloadStatus, error) {
+	now := nowFunc()
+	monthStart, monthEnd := currentMonthBounds(now)
+	events, err := fetchCalendarEvents(monthStart, monthEnd)
+	if err != nil {
+		return WorkloadStatus{}, fmt.Errorf("calendar workload: %w", err)
+	}
+	worked, err := fetchWorkedDuration(monthStart, monthEnd, configuredCalendarProjectIDs())
+	if err != nil {
+		return WorkloadStatus{}, fmt.Errorf("calendar workload: %w", err)
+	}
+	return calculateWorkloadStatus(cfg.Calendar.MonthlyHourBudget, worked, events, now), nil
+}
+
+func formatDurationHours(d time.Duration) string {
+	if d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	}
+	return fmt.Sprintf("%.1fh", d.Hours())
+}
+
+func printCalendarStartHint(status WorkloadStatus) {
+	if status.RecommendedToday == 0 {
+		fmt.Println("Work today to stay on track: no additional work needed")
+		return
+	}
+	fmt.Printf("Work today to stay on track: %s\n", formatDurationHours(status.RecommendedToday))
+}
+
+func printCalendarOverview(status WorkloadStatus) {
+	fmt.Println("┌─ Calendar workload ─────────────────────────")
+	fmt.Printf("│ Worked this month:        %s / %.1fh\n", formatDurationHours(status.Worked), status.MonthlyHourBudget)
+	fmt.Printf("│ Planned calendar time:    %s\n", formatDurationHours(status.Planned))
+	fmt.Printf("│ Remaining required work:  %s\n", formatDurationHours(status.RemainingRequired))
+	fmt.Printf("│ Future planned work:      %s\n", formatDurationHours(status.FuturePlanned))
+	fmt.Printf("│ Recommended today:        %s\n", formatDurationHours(status.RecommendedToday))
+	fmt.Println("└──────────────────────────────────────────────")
+}
+
+func printCalendarResult(status WorkloadStatus, err error) {
+	if err != nil {
+		fmt.Printf("Calendar workload error: %v\n", err)
+		return
+	}
+	printCalendarOverview(status)
 }
 
 func gitLogBaseArgs(repo string) []string {
@@ -697,7 +937,7 @@ func startCmd() *cobra.Command {
 				WorkspaceID: cfg.Toggl.WorkspaceID,
 				ProjectID:   cfg.Toggl.ProjectID,
 				CreatedWith: "toggl-cli",
-				Start:       time.Now().UTC().Format(time.RFC3339),
+				Start:       nowFunc().UTC().Format(time.RFC3339),
 				Duration:    -1,
 			}
 
@@ -708,6 +948,14 @@ func startCmd() *cobra.Command {
 			}
 
 			fmt.Println("Started tracking")
+			if cfg.Calendar.Enabled() {
+				status, err := loadWorkloadStatus()
+				if err != nil {
+					fmt.Printf("Calendar workload error: %v\n", err)
+				} else {
+					printCalendarStartHint(status)
+				}
+			}
 			return nil
 		},
 	}
@@ -727,6 +975,12 @@ func stopCmd() *cobra.Command {
 				return err
 			}
 
+			var calendarStatus WorkloadStatus
+			var calendarErr error
+			if cfg.Calendar.Enabled() {
+				calendarStatus, calendarErr = loadWorkloadStatus()
+			}
+
 			var projectCommits []ProjectCommit
 			if len(cfg.Projects) > 0 {
 				projectCommits = collectProjectCommits(entry)
@@ -741,6 +995,9 @@ func stopCmd() *cobra.Command {
 					if !ok {
 						os.Remove(worklogPath())
 						fmt.Println("Stopped tracking. No summary saved.")
+						if cfg.Calendar.Enabled() {
+							printCalendarResult(calendarStatus, calendarErr)
+						}
 						return nil
 					}
 					appliedSplits, err := applyProjectSplits(entry, splits, "")
@@ -749,6 +1006,9 @@ func stopCmd() *cobra.Command {
 					}
 					os.Remove(worklogPath())
 					printProjectSplitSummary(appliedSplits)
+					if cfg.Calendar.Enabled() {
+						printCalendarResult(calendarStatus, calendarErr)
+					}
 					return nil
 				}
 			}
@@ -759,6 +1019,9 @@ func stopCmd() *cobra.Command {
 			if description == "" {
 				os.Remove(worklogPath())
 				fmt.Println("Stopped tracking. No summary saved.")
+				if cfg.Calendar.Enabled() {
+					printCalendarResult(calendarStatus, calendarErr)
+				}
 				return nil
 			}
 
@@ -769,6 +1032,28 @@ func stopCmd() *cobra.Command {
 			os.Remove(worklogPath())
 
 			printEntrySummary(entry)
+			if cfg.Calendar.Enabled() {
+				printCalendarResult(calendarStatus, calendarErr)
+			}
+			return nil
+		},
+	}
+}
+
+func trackCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "track",
+		Short: "Show calendar workload budget status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !cfg.Calendar.Enabled() {
+				return fmt.Errorf("calendar workload tracking is not configured")
+			}
+
+			status, err := loadWorkloadStatus()
+			if err != nil {
+				return err
+			}
+			printCalendarOverview(status)
 			return nil
 		},
 	}
@@ -847,15 +1132,19 @@ func logCmd() *cobra.Command {
 
 // --- Main ---
 
+func rootCmd() *cobra.Command {
+	root := &cobra.Command{Use: "toggl", Version: version}
+	root.AddCommand(startCmd(), stopCmd(), trackCmd(), logCmd(), whoamiCmd(), projectsCmd(), repairSummariesCmd())
+	return root
+}
+
 func main() {
 	if err := loadConfig(); err != nil {
 		fmt.Println("Error loading config:", err)
 		os.Exit(1)
 	}
 
-	root := &cobra.Command{Use: "toggl", Version: version}
-	root.AddCommand(startCmd(), stopCmd(), logCmd(), whoamiCmd(), projectsCmd(), repairSummariesCmd())
-	if err := root.Execute(); err != nil {
+	if err := rootCmd().Execute(); err != nil {
 		fmt.Println("Error:", err)
 		os.Exit(1)
 	}
