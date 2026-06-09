@@ -63,6 +63,17 @@ func gitEnv(t *testing.T, dir string, env []string, args ...string) {
 	}
 }
 
+func gitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func mustTime(t *testing.T, value string) time.Time {
 	t.Helper()
 	parsed, err := time.Parse(time.RFC3339, value)
@@ -289,6 +300,142 @@ func TestCollectProjectCommits_CollectsProjectMetadata(t *testing.T) {
 	}
 }
 
+func TestCollectCommits_IncludesAllRefsInTimeWindow(t *testing.T) {
+	setCfg(t, Config{})
+	repo := t.TempDir()
+	git(t, repo, "init")
+	git(t, repo, "config", "user.name", "Test User")
+	git(t, repo, "config", "user.email", "test@example.com")
+
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("main"), 0644); err != nil {
+		t.Fatalf("write main file: %v", err)
+	}
+	git(t, repo, "add", "file.txt")
+	gitEnv(t, repo, []string{
+		"GIT_AUTHOR_DATE=2024-01-01T09:30:00Z",
+		"GIT_COMMITTER_DATE=2024-01-01T09:30:00Z",
+	}, "commit", "-m", "Already on main")
+	mainCommit := gitOutput(t, repo, "rev-parse", "HEAD")
+	git(t, repo, "update-ref", "refs/remotes/origin/main", mainCommit)
+
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("feature"), 0644); err != nil {
+		t.Fatalf("write feature file: %v", err)
+	}
+	git(t, repo, "add", "file.txt")
+	gitEnv(t, repo, []string{
+		"GIT_AUTHOR_DATE=2024-01-01T10:30:00Z",
+		"GIT_COMMITTER_DATE=2024-01-01T10:30:00Z",
+	}, "commit", "-m", "Feature branch work")
+
+	cfg.Git.User = "Test User"
+	cfg.Repositories = []string{repo}
+	entry := TogglTimeEntry{
+		Start: mustTime(t, "2024-01-01T09:00:00Z"),
+		Stop:  mustTime(t, "2024-01-01T11:00:00Z"),
+	}
+
+	commits := collectCommits(entry)
+	joined := strings.Join(commits, "\n")
+	if !strings.Contains(joined, "Already on main") {
+		t.Fatalf("expected origin/main commit to be included, got: %s", joined)
+	}
+	if !strings.Contains(joined, "Feature branch work") {
+		t.Fatalf("expected branch commit to be included, got: %s", joined)
+	}
+}
+
+func TestCollectProjectCommits_IncludesAllRefsInTimeWindow(t *testing.T) {
+	setCfg(t, Config{})
+	repo := t.TempDir()
+	git(t, repo, "init")
+	git(t, repo, "config", "user.name", "Test User")
+	git(t, repo, "config", "user.email", "test@example.com")
+
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("main"), 0644); err != nil {
+		t.Fatalf("write main file: %v", err)
+	}
+	git(t, repo, "add", "file.txt")
+	gitEnv(t, repo, []string{
+		"GIT_AUTHOR_DATE=2024-01-01T09:30:00Z",
+		"GIT_COMMITTER_DATE=2024-01-01T09:30:00Z",
+	}, "commit", "-m", "Already on main")
+	mainCommit := gitOutput(t, repo, "rev-parse", "HEAD")
+	git(t, repo, "update-ref", "refs/remotes/origin/main", mainCommit)
+
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("feature"), 0644); err != nil {
+		t.Fatalf("write feature file: %v", err)
+	}
+	git(t, repo, "add", "file.txt")
+	gitEnv(t, repo, []string{
+		"GIT_AUTHOR_DATE=2024-01-01T10:30:00Z",
+		"GIT_COMMITTER_DATE=2024-01-01T10:30:00Z",
+	}, "commit", "-m", "Feature branch work")
+
+	cfg.Git.User = "Test User"
+	cfg.Projects = map[string]ProjectConfig{
+		"cortex": {ProjectID: 111, Repositories: []string{repo}},
+	}
+	entry := TogglTimeEntry{
+		Start: mustTime(t, "2024-01-01T09:00:00Z"),
+		Stop:  mustTime(t, "2024-01-01T11:00:00Z"),
+	}
+
+	commits := collectProjectCommits(entry)
+	if len(commits) != 2 {
+		t.Fatalf("expected origin/main and branch commits, got %d: %#v", len(commits), commits)
+	}
+	if commits[0].Subject != "Already on main" || commits[1].Subject != "Feature branch work" {
+		t.Fatalf("expected origin/main and branch commit subjects, got %#v", commits)
+	}
+}
+
+func TestCollectProjectCommits_IncludesOriginMainWhenLocalHeadIsBehind(t *testing.T) {
+	setCfg(t, Config{})
+	repo := t.TempDir()
+	git(t, repo, "init")
+	git(t, repo, "config", "user.name", "Test User")
+	git(t, repo, "config", "user.email", "test@example.com")
+
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("local"), 0644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	git(t, repo, "add", "file.txt")
+	gitEnv(t, repo, []string{
+		"GIT_AUTHOR_DATE=2024-01-01T09:00:00Z",
+		"GIT_COMMITTER_DATE=2024-01-01T09:00:00Z",
+	}, "commit", "-m", "Local main before fetch")
+	localHead := gitOutput(t, repo, "rev-parse", "HEAD")
+
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("remote"), 0644); err != nil {
+		t.Fatalf("write remote file: %v", err)
+	}
+	git(t, repo, "add", "file.txt")
+	gitEnv(t, repo, []string{
+		"GIT_AUTHOR_DATE=2024-01-01T10:00:00Z",
+		"GIT_COMMITTER_DATE=2024-01-01T10:00:00Z",
+	}, "commit", "-m", "Remote main work")
+	remoteMain := gitOutput(t, repo, "rev-parse", "HEAD")
+	git(t, repo, "update-ref", "refs/remotes/origin/main", remoteMain)
+	git(t, repo, "reset", "--hard", localHead)
+
+	cfg.Git.User = "Test User"
+	cfg.Projects = map[string]ProjectConfig{
+		"cortex": {ProjectID: 111, Repositories: []string{repo}},
+	}
+	entry := TogglTimeEntry{
+		Start: mustTime(t, "2024-01-01T09:30:00Z"),
+		Stop:  mustTime(t, "2024-01-01T10:30:00Z"),
+	}
+
+	commits := collectProjectCommits(entry)
+	if len(commits) != 1 {
+		t.Fatalf("expected one origin/main commit, got %d: %#v", len(commits), commits)
+	}
+	if commits[0].Subject != "Remote main work" {
+		t.Fatalf("expected origin/main commit subject, got %#v", commits[0])
+	}
+}
+
 func TestCalculateProjectSplits_MidpointAllocationProducesContiguousRanges(t *testing.T) {
 	entry := TogglTimeEntry{
 		Start: mustTime(t, "2024-01-01T09:00:00Z"),
@@ -408,8 +555,12 @@ func TestCreateTimeEntry_PostsStoppedEntry(t *testing.T) {
 		Duration:    90 * time.Minute,
 	}
 
-	if err := createTimeEntry(split, "Session summary", 100); err != nil {
+	entryID, err := createTimeEntry(split, "Session summary", 100)
+	if err != nil {
 		t.Fatalf("createTimeEntry returned error: %v", err)
+	}
+	if entryID != 1 {
+		t.Fatalf("expected created entry ID 1, got %d", entryID)
 	}
 
 	if method != "POST" {
@@ -555,6 +706,44 @@ func TestOpenAISummarize_Success(t *testing.T) {
 	}
 	if result != "Test summary" {
 		t.Errorf("expected 'Test summary', got %q", result)
+	}
+}
+
+func TestOpenAISummarize_RequestsOneLinePlainTextSummary(t *testing.T) {
+	setCfg(t, Config{})
+	cfg.OpenAI.APIKey = "sk-test"
+	cfg.OpenAI.Model = "gpt-4"
+
+	var body string
+	setupOpenAIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read OpenAI body: %v", err)
+		}
+		body = string(data)
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": "Brief work summary."}},
+			},
+		})
+	})
+
+	if _, err := openAISummarize("many commits"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, want := range []string{
+		"exactly one brief sentence",
+		"maximum 140 characters",
+		"No Markdown",
+		"no bullets",
+		"no headings",
+		"no repository list",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected OpenAI request to contain %q, got: %s", want, body)
+		}
 	}
 }
 
@@ -1377,10 +1566,137 @@ func TestStopCmd_ProjectConfigMultipleProjectsSplitsEntries(t *testing.T) {
 		t.Fatalf("expected AI summary descriptions, got update %q create %q", updated.Description, created.Description)
 	}
 	output := string(captured)
-	for _, want := range []string{"Stopped tracking. Split into:", "cortex", "1h30m0s", "voicesense", "2h30m0s", "Summary saved."} {
+	for _, want := range []string{
+		"Stopped tracking. Split into:",
+		"entry 999",
+		"cortex",
+		"project 111",
+		"2024-01-01T09:00:00Z -> 2024-01-01T10:30:00Z",
+		"1h30m0s",
+		"entry 1000",
+		"voicesense",
+		"project 222",
+		"2024-01-01T10:30:00Z -> 2024-01-01T13:00:00Z",
+		"2h30m0s",
+		"Summary saved.",
+	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected split output to contain %q, got: %s", want, output)
 		}
+	}
+}
+
+func TestStopCmd_ProjectSplitsUseProjectSpecificSummaries(t *testing.T) {
+	setCfg(t, Config{})
+	cfg.Toggl.APIKey = "key"
+	cfg.Toggl.WorkspaceID = 100
+	cfg.OpenAI.APIKey = "sk-test"
+	cfg.OpenAI.Model = "gpt-4"
+	cfg.Git.User = "Test User"
+
+	start := mustTime(t, "2024-01-01T09:00:00Z")
+	stop := mustTime(t, "2024-01-01T13:00:00Z")
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return stop }
+	t.Cleanup(func() { nowFunc = oldNow })
+
+	cortexRepo := t.TempDir()
+	voicesenseRepo := t.TempDir()
+	for _, repo := range []string{cortexRepo, voicesenseRepo} {
+		git(t, repo, "init")
+		git(t, repo, "config", "user.name", "Test User")
+		git(t, repo, "config", "user.email", "test@example.com")
+	}
+	if err := os.WriteFile(filepath.Join(cortexRepo, "file.txt"), []byte("cortex"), 0644); err != nil {
+		t.Fatalf("write cortex file: %v", err)
+	}
+	git(t, cortexRepo, "add", "file.txt")
+	gitEnv(t, cortexRepo, []string{
+		"GIT_AUTHOR_DATE=2024-01-01T09:30:00Z",
+		"GIT_COMMITTER_DATE=2024-01-01T09:30:00Z",
+	}, "commit", "-m", "Build cortex flow")
+	if err := os.WriteFile(filepath.Join(voicesenseRepo, "file.txt"), []byte("voicesense"), 0644); err != nil {
+		t.Fatalf("write voicesense file: %v", err)
+	}
+	git(t, voicesenseRepo, "add", "file.txt")
+	gitEnv(t, voicesenseRepo, []string{
+		"GIT_AUTHOR_DATE=2024-01-01T11:30:00Z",
+		"GIT_COMMITTER_DATE=2024-01-01T11:30:00Z",
+	}, "commit", "-m", "Improve voicesense export")
+
+	cfg.Projects = map[string]ProjectConfig{
+		"cortex":     {ProjectID: 111, Repositories: []string{cortexRepo}},
+		"voicesense": {ProjectID: 222, Repositories: []string{voicesenseRepo}},
+	}
+	os.Remove(worklogPath())
+	t.Cleanup(func() { os.Remove(worklogPath()) })
+
+	var putBodies []TogglTimeEntry
+	var postBodies []struct {
+		ProjectID   int    `json:"project_id"`
+		Description string `json:"description"`
+	}
+	setupTogglServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "current"):
+			json.NewEncoder(w).Encode(TogglTimeEntry{ID: 999, Workspace: 100, Start: start})
+		case r.Method == "PUT":
+			var body TogglTimeEntry
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode PUT body: %v", err)
+			}
+			putBodies = append(putBodies, body)
+			w.Write([]byte(`{"id":999}`))
+		case r.Method == "POST":
+			var body struct {
+				ProjectID   int    `json:"project_id"`
+				Description string `json:"description"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode POST body: %v", err)
+			}
+			postBodies = append(postBodies, body)
+			w.Write([]byte(`{"id":1000}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	setupOpenAIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		text := string(body)
+		summary := "Combined summary"
+		if strings.Contains(text, "Build cortex flow") && !strings.Contains(text, "Improve voicesense export") {
+			summary = "Cortex summary"
+		}
+		if strings.Contains(text, "Improve voicesense export") && !strings.Contains(text, "Build cortex flow") {
+			summary = "VoiceSense summary"
+		}
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{{"message": map[string]string{"content": summary}}},
+		})
+	})
+
+	oldStdout := os.Stdout
+	outR, outW, _ := os.Pipe()
+	os.Stdout = outW
+	err := stopCmd().Execute()
+	outW.Close()
+	os.Stdout = oldStdout
+	io.ReadAll(outR)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(putBodies) != 2 || len(postBodies) != 1 {
+		t.Fatalf("expected stop/update PUTs and one POST, got puts=%d posts=%d", len(putBodies), len(postBodies))
+	}
+	if putBodies[1].Description != "Cortex summary" {
+		t.Fatalf("expected original cortex summary, got %q", putBodies[1].Description)
+	}
+	if postBodies[0].Description != "VoiceSense summary" {
+		t.Fatalf("expected created voicesense summary, got %q", postBodies[0].Description)
 	}
 }
 
