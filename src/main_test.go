@@ -12,6 +12,62 @@ import (
 	"time"
 )
 
+func TestOpenAISummarizeSendsExplicitSummaryInstructions(t *testing.T) {
+	oldCfg, oldOpenAIBaseURL := cfg, openAIBaseURL
+	defer func() {
+		cfg, openAIBaseURL = oldCfg, oldOpenAIBaseURL
+	}()
+
+	cfg.OpenAI.Model = "test-model"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode OpenAI request: %v", err)
+		}
+
+		var systemMessage string
+		for _, message := range request.Messages {
+			if message.Role == "system" {
+				systemMessage = message.Content
+				break
+			}
+		}
+		for _, instruction := range []string{
+			"one to three highest-impact outcomes",
+			"state a concrete action and the affected capability, feature, or defect",
+			"issue identifier only when it identifies a selected high-impact outcome",
+			"OpenSpec proposals and archives, merge commits, dependency updates",
+			"Write one readable line",
+			"maximum 280 characters",
+		} {
+			if !strings.Contains(systemMessage, instruction) {
+				t.Errorf("system message missing %q: %q", instruction, systemMessage)
+			}
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]string{"content": "Added project filtering"},
+			}},
+		})
+	}))
+	defer server.Close()
+	openAIBaseURL = server.URL
+
+	description, err := openAISummarize("feat: filter projects")
+	if err != nil {
+		t.Fatalf("openAISummarize returned error: %v", err)
+	}
+	if description != "Added project filtering" {
+		t.Fatalf("description = %q, want unchanged response", description)
+	}
+}
+
 func TestCalendarConfigEnabledOnlyWhenRequiredFieldsPresent(t *testing.T) {
 	var c Config
 	if c.Calendar.Enabled() {

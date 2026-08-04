@@ -131,8 +131,12 @@ const worklogFile = "toggl-worklog.txt"
 const badSummaryText = "Sure! Please provide the details of your commits so I can generate a concise summary for you."
 
 const openAISystemPrompt = `You summarize Git commits and work logs for Toggl time entry descriptions.
-Write exactly one brief sentence, maximum 140 characters.
-No Markdown, no bullets, no headings, no repository list, and no commit hashes.`
+Infer the one to three highest-impact outcomes from the supplied commits and work log.
+For each selected outcome, state a concrete action and the affected capability, feature, or defect.
+Include an issue identifier only when it identifies a selected high-impact outcome; do not list every issue or pull request.
+Prefer substantive implementation work over process noise. Ignore OpenSpec proposals and archives, merge commits, dependency updates, localisation churn, and configuration-only changes unless no substantive work is present.
+Write one readable line, maximum 280 characters. Use concise clauses separated by semicolons where useful.
+Avoid vague phrases such as "OpenSpec changes", "various updates", "implemented improvements", and "merged PRs" unless unavoidable.`
 
 // --- Global vars ---
 
