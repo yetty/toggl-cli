@@ -104,6 +104,19 @@ func TestMonthAndDayBoundariesUseLocalTime(t *testing.T) {
 	}
 }
 
+func TestNextMonthBoundsUseLocalTimeAcrossYearBoundary(t *testing.T) {
+	loc := time.FixedZone("local", 2*60*60)
+	now := time.Date(2026, time.December, 31, 15, 30, 0, 0, loc)
+
+	nextStart, nextEnd := nextMonthBounds(now)
+	if want := time.Date(2027, time.January, 1, 0, 0, 0, 0, loc); !nextStart.Equal(want) {
+		t.Fatalf("next month start = %s, want %s", nextStart, want)
+	}
+	if want := time.Date(2027, time.February, 1, 0, 0, 0, 0, loc); !nextEnd.Equal(want) {
+		t.Fatalf("next month end = %s, want %s", nextEnd, want)
+	}
+}
+
 func TestFilterMatchingTimedCalendarEvents(t *testing.T) {
 	loc := time.FixedZone("local", 0)
 	items := []googleCalendarEvent{
@@ -354,6 +367,151 @@ func TestTrackCommandPrintsCalendarOverviewWhenConfigured(t *testing.T) {
 	}
 	if !strings.Contains(output, "Recommended today:        3h") {
 		t.Fatalf("output missing recommendation: %q", output)
+	}
+}
+
+func TestTrackCommandPrintsNextMonthPlannedWorkWhenBudgetMet(t *testing.T) {
+	oldCfg, oldTogglBase, oldCalendarBase, oldNow := cfg, togglBaseURL, calendarBaseURL, nowFunc
+	defer func() {
+		cfg, togglBaseURL, calendarBaseURL, nowFunc = oldCfg, oldTogglBase, oldCalendarBase, oldNow
+	}()
+
+	nowFunc = func() time.Time { return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC) }
+	cfg = Config{}
+	cfg.Calendar.ID = "calendar@example.com"
+	cfg.Calendar.APIKey = "key"
+	cfg.Calendar.EventNames = []string{"Deep Work"}
+	cfg.Calendar.MonthlyHourBudget = 10
+	cfg.Calendar.ProjectIDs = []int{10}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/me/time_entries":
+			json.NewEncoder(w).Encode([]TogglTimeEntry{{Project: 10, Start: time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC), Stop: time.Date(2026, 6, 1, 13, 0, 0, 0, time.UTC)}})
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/calendar/calendars/"):
+			timeMin := r.URL.Query().Get("timeMin")
+			switch {
+			case strings.HasPrefix(timeMin, "2026-06-01"):
+				json.NewEncoder(w).Encode(googleCalendarEventsResponse{Items: []googleCalendarEvent{{Summary: "Deep Work", Start: googleCalendarDateTime{DateTime: "2026-06-10T09:00:00Z"}, End: googleCalendarDateTime{DateTime: "2026-06-10T12:00:00Z"}}}})
+			case strings.HasPrefix(timeMin, "2026-07-01"):
+				json.NewEncoder(w).Encode(googleCalendarEventsResponse{Items: []googleCalendarEvent{
+					{Summary: "Deep Work", Start: googleCalendarDateTime{DateTime: "2026-07-01T09:00:00Z"}, End: googleCalendarDateTime{DateTime: "2026-07-01T15:00:00Z"}},
+					{Summary: "Deep Work", Start: googleCalendarDateTime{DateTime: "2026-07-02T09:00:00Z"}, End: googleCalendarDateTime{DateTime: "2026-07-02T13:00:00Z"}},
+				}})
+			default:
+				t.Fatalf("unexpected calendar timeMin %q", timeMin)
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+	togglBaseURL = server.URL + "/api/"
+	calendarBaseURL = server.URL + "/calendar/"
+
+	output, err := captureStdout(func() error { return trackCmd().RunE(trackCmd(), nil) })
+	if err != nil {
+		t.Fatalf("track command returned error: %v", err)
+	}
+	if !strings.Contains(output, "Next month planned work: 10h (meets expected 10.0h)") {
+		t.Fatalf("output missing next-month meets status: %q", output)
+	}
+}
+
+func TestTrackCommandPrintsNextMonthPlannedWorkWhenBelowBudget(t *testing.T) {
+	oldCfg, oldTogglBase, oldCalendarBase, oldNow := cfg, togglBaseURL, calendarBaseURL, nowFunc
+	defer func() {
+		cfg, togglBaseURL, calendarBaseURL, nowFunc = oldCfg, oldTogglBase, oldCalendarBase, oldNow
+	}()
+
+	nowFunc = func() time.Time { return time.Date(2026, 12, 31, 12, 0, 0, 0, time.UTC) }
+	cfg = Config{}
+	cfg.Calendar.ID = "calendar@example.com"
+	cfg.Calendar.APIKey = "key"
+	cfg.Calendar.EventNames = []string{"Deep Work"}
+	cfg.Calendar.MonthlyHourBudget = 10
+	cfg.Calendar.ProjectIDs = []int{10}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/me/time_entries":
+			json.NewEncoder(w).Encode([]TogglTimeEntry{})
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/calendar/calendars/"):
+			timeMin := r.URL.Query().Get("timeMin")
+			switch {
+			case strings.HasPrefix(timeMin, "2026-12-01"):
+				json.NewEncoder(w).Encode(googleCalendarEventsResponse{})
+			case strings.HasPrefix(timeMin, "2027-01-01"):
+				json.NewEncoder(w).Encode(googleCalendarEventsResponse{Items: []googleCalendarEvent{{Summary: "Deep Work", Start: googleCalendarDateTime{DateTime: "2027-01-03T09:00:00Z"}, End: googleCalendarDateTime{DateTime: "2027-01-03T13:00:00Z"}}}})
+			default:
+				t.Fatalf("unexpected calendar timeMin %q", timeMin)
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+	togglBaseURL = server.URL + "/api/"
+	calendarBaseURL = server.URL + "/calendar/"
+
+	output, err := captureStdout(func() error { return trackCmd().RunE(trackCmd(), nil) })
+	if err != nil {
+		t.Fatalf("track command returned error: %v", err)
+	}
+	if !strings.Contains(output, "Next month planned work: 4h (below expected 10.0h)") {
+		t.Fatalf("output missing next-month below status: %q", output)
+	}
+}
+
+func TestTrackCommandUsesSingleNowForCurrentAndNextMonth(t *testing.T) {
+	oldCfg, oldTogglBase, oldCalendarBase, oldNow := cfg, togglBaseURL, calendarBaseURL, nowFunc
+	defer func() {
+		cfg, togglBaseURL, calendarBaseURL, nowFunc = oldCfg, oldTogglBase, oldCalendarBase, oldNow
+	}()
+
+	calls := 0
+	nowFunc = func() time.Time {
+		calls++
+		if calls == 1 {
+			return time.Date(2026, 6, 30, 23, 59, 59, 0, time.UTC)
+		}
+		return time.Date(2026, 7, 1, 0, 0, 1, 0, time.UTC)
+	}
+	cfg = Config{}
+	cfg.Calendar.ID = "calendar@example.com"
+	cfg.Calendar.APIKey = "key"
+	cfg.Calendar.EventNames = []string{"Deep Work"}
+	cfg.Calendar.MonthlyHourBudget = 10
+	cfg.Calendar.ProjectIDs = []int{10}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/me/time_entries":
+			json.NewEncoder(w).Encode([]TogglTimeEntry{})
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/calendar/calendars/"):
+			timeMin := r.URL.Query().Get("timeMin")
+			switch {
+			case strings.HasPrefix(timeMin, "2026-06-01"):
+				json.NewEncoder(w).Encode(googleCalendarEventsResponse{})
+			case strings.HasPrefix(timeMin, "2026-07-01"):
+				json.NewEncoder(w).Encode(googleCalendarEventsResponse{Items: []googleCalendarEvent{{Summary: "Deep Work", Start: googleCalendarDateTime{DateTime: "2026-07-03T09:00:00Z"}, End: googleCalendarDateTime{DateTime: "2026-07-03T19:00:00Z"}}}})
+			default:
+				t.Fatalf("unexpected calendar timeMin %q", timeMin)
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+	togglBaseURL = server.URL + "/api/"
+	calendarBaseURL = server.URL + "/calendar/"
+
+	output, err := captureStdout(func() error { return trackCmd().RunE(trackCmd(), nil) })
+	if err != nil {
+		t.Fatalf("track command returned error: %v", err)
+	}
+	if !strings.Contains(output, "Next month planned work: 10h (meets expected 10.0h)") {
+		t.Fatalf("output missing next-month status derived from initial now: %q", output)
 	}
 }
 

@@ -279,6 +279,11 @@ func currentMonthBounds(now time.Time) (time.Time, time.Time) {
 	return start, start.AddDate(0, 1, 0)
 }
 
+func nextMonthBounds(now time.Time) (time.Time, time.Time) {
+	_, currentEnd := currentMonthBounds(now)
+	return currentEnd, currentEnd.AddDate(0, 1, 0)
+}
+
 func currentDayBounds(now time.Time) (time.Time, time.Time) {
 	loc := now.Location()
 	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
@@ -413,8 +418,19 @@ func calculateWorkloadStatus(monthlyHourBudget float64, worked time.Duration, ev
 	return status
 }
 
+func sumCalendarEventDurations(events []CalendarEvent) time.Duration {
+	var total time.Duration
+	for _, event := range events {
+		total += event.Duration()
+	}
+	return total
+}
+
 func loadWorkloadStatus() (WorkloadStatus, error) {
-	now := nowFunc()
+	return loadWorkloadStatusAt(nowFunc())
+}
+
+func loadWorkloadStatusAt(now time.Time) (WorkloadStatus, error) {
 	monthStart, monthEnd := currentMonthBounds(now)
 	events, err := fetchCalendarEvents(monthStart, monthEnd)
 	if err != nil {
@@ -425,6 +441,19 @@ func loadWorkloadStatus() (WorkloadStatus, error) {
 		return WorkloadStatus{}, fmt.Errorf("calendar workload: %w", err)
 	}
 	return calculateWorkloadStatus(cfg.Calendar.MonthlyHourBudget, worked, events, now), nil
+}
+
+func loadNextMonthPlannedDuration() (time.Duration, error) {
+	return loadNextMonthPlannedDurationAt(nowFunc())
+}
+
+func loadNextMonthPlannedDurationAt(now time.Time) (time.Duration, error) {
+	nextMonthStart, nextMonthEnd := nextMonthBounds(now)
+	events, err := fetchCalendarEvents(nextMonthStart, nextMonthEnd)
+	if err != nil {
+		return 0, fmt.Errorf("calendar workload: %w", err)
+	}
+	return sumCalendarEventDurations(events), nil
 }
 
 func formatDurationHours(d time.Duration) string {
@@ -449,6 +478,21 @@ func printCalendarOverview(status WorkloadStatus) {
 	fmt.Printf("│ Remaining required work:  %s\n", formatDurationHours(status.RemainingRequired))
 	fmt.Printf("│ Future planned work:      %s\n", formatDurationHours(status.FuturePlanned))
 	fmt.Printf("│ Recommended today:        %s\n", formatDurationHours(status.RecommendedToday))
+	fmt.Println("└──────────────────────────────────────────────")
+}
+
+func printTrackCalendarOverview(status WorkloadStatus, nextMonthPlanned time.Duration) {
+	result := "below"
+	if nextMonthPlanned >= time.Duration(status.MonthlyHourBudget*float64(time.Hour)) {
+		result = "meets"
+	}
+	fmt.Println("┌─ Calendar workload ─────────────────────────")
+	fmt.Printf("│ Worked this month:        %s / %.1fh\n", formatDurationHours(status.Worked), status.MonthlyHourBudget)
+	fmt.Printf("│ Planned calendar time:    %s\n", formatDurationHours(status.Planned))
+	fmt.Printf("│ Remaining required work:  %s\n", formatDurationHours(status.RemainingRequired))
+	fmt.Printf("│ Future planned work:      %s\n", formatDurationHours(status.FuturePlanned))
+	fmt.Printf("│ Recommended today:        %s\n", formatDurationHours(status.RecommendedToday))
+	fmt.Printf("│ Next month planned work: %s (%s expected %.1fh)\n", formatDurationHours(nextMonthPlanned), result, status.MonthlyHourBudget)
 	fmt.Println("└──────────────────────────────────────────────")
 }
 
@@ -1053,11 +1097,16 @@ func trackCmd() *cobra.Command {
 				return fmt.Errorf("calendar workload tracking is not configured")
 			}
 
-			status, err := loadWorkloadStatus()
+			now := nowFunc()
+			status, err := loadWorkloadStatusAt(now)
 			if err != nil {
 				return err
 			}
-			printCalendarOverview(status)
+			nextMonthPlanned, err := loadNextMonthPlannedDurationAt(now)
+			if err != nil {
+				return err
+			}
+			printTrackCalendarOverview(status, nextMonthPlanned)
 			return nil
 		},
 	}

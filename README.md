@@ -5,7 +5,7 @@ A simple command-line tool to track time in [Toggl Track](https://track.toggl.co
 This tool allows you to:
 
 * Start and stop Toggl timers for a specific project.
-* Check calendar workload budget status on demand.
+* Check calendar workload budget status on demand, including next month's planned work against the expected monthly hours.
 * Log work activities during your session.
 * Automatically collect Git commits between timer start/stop.
 * Generate a summary of commits and work logs via OpenAI and save it to the time entry.
@@ -17,7 +17,7 @@ This tool allows you to:
 ## Features
 
 * **Start/Stop timers** with `toggl start` and `toggl stop`.
-* **Calendar workload status**: `toggl track` reports current calendar budget progress.
+* **Calendar workload status**: `toggl track` reports current calendar budget progress plus next-month planned work against the expected monthly hours.
 * **Work logging**: `toggl log` saves work activities for session summarization.
 * **Commit summarization**: `stop` generates AI summary of Git commits and work logs.
 * **User info**: `toggl whoami` prints current Toggl user ID and email.
@@ -112,7 +112,7 @@ calendar:
 * **Git**: only commits authored by this user will be summarized.
 * **Projects**: optional map of project names to Toggl project IDs and Git repositories. When project commits are detected during `toggl stop`, the CLI can split one stopped timer into multiple project-specific Toggl entries with contiguous time ranges.
 * **Repositories**: legacy list of Git repositories to scan for commits. This still works for summary-only behavior when `projects:` is not configured or no project commits are detected.
-* **Calendar**: optional Google Calendar workload tracking. Use a calendar that is public/shareable enough for Google Calendar API-key reads, then configure its calendar ID, exact event names to count as planned work, a fixed monthly hour budget, and the Toggl project IDs that count as actual worked time. This powers on-demand workload status checks with `toggl track`, plus calendar hints after `start`/`stop`. When `project_ids` is omitted, the CLI falls back to configured Toggl project IDs.
+* **Calendar**: optional Google Calendar workload tracking. Use a calendar that is public/shareable enough for Google Calendar API-key reads, then configure its calendar ID, exact event names to count as planned work, a fixed monthly hour budget, and the Toggl project IDs that count as actual worked time. This powers on-demand workload status checks with `toggl track`, including a next-month planned-hours line that indicates whether planned work meets the monthly budget, plus calendar hints after `start`/`stop`. When `project_ids` is omitted, the CLI falls back to configured Toggl project IDs.
 
 ---
 
