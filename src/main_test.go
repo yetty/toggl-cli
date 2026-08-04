@@ -557,6 +557,186 @@ func TestRootCommandIncludesTrack(t *testing.T) {
 	t.Fatal("root command missing track subcommand")
 }
 
+func TestRootCommandIncludesFillEmptyDescriptions(t *testing.T) {
+	cmd := rootCmd()
+	for _, command := range cmd.Commands() {
+		if command.Name() == "fill-empty-descriptions" {
+			if !strings.Contains(command.Short, "empty") || !strings.Contains(command.Short, "propose") {
+				t.Fatalf("fill-empty-descriptions short description should mention empty descriptions and proposals, got %q", command.Short)
+			}
+			return
+		}
+	}
+	t.Fatal("root command missing fill-empty-descriptions subcommand")
+}
+
+func TestFillEmptyDescriptionsUsesDefaultSevenDayRange(t *testing.T) {
+	oldCfg, oldTogglBase, oldNow := cfg, togglBaseURL, nowFunc
+	defer func() {
+		cfg, togglBaseURL, nowFunc = oldCfg, oldTogglBase, oldNow
+	}()
+
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	nowFunc = func() time.Time { return now }
+	cfg = Config{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/api/me/time_entries" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if got, want := r.URL.Query().Get("start_date"), now.AddDate(0, 0, -7).Format(time.RFC3339); got != want {
+			t.Fatalf("start_date = %q, want %q", got, want)
+		}
+		if got, want := r.URL.Query().Get("end_date"), now.Format(time.RFC3339); got != want {
+			t.Fatalf("end_date = %q, want %q", got, want)
+		}
+		json.NewEncoder(w).Encode([]TogglTimeEntry{})
+	}))
+	defer server.Close()
+	togglBaseURL = server.URL + "/api/"
+
+	output, err := captureStdout(func() error { return fillEmptyDescriptionsCmd().Execute() })
+	if err != nil {
+		t.Fatalf("fill-empty-descriptions returned error: %v", err)
+	}
+	if !strings.Contains(output, "No empty descriptions found") {
+		t.Fatalf("output missing no-empty message: %q", output)
+	}
+}
+
+func TestFillEmptyDescriptionsUsesExplicitRangeAndRejectsPartialRange(t *testing.T) {
+	oldCfg, oldTogglBase := cfg, togglBaseURL
+	defer func() { cfg, togglBaseURL = oldCfg, oldTogglBase }()
+	cfg = Config{}
+
+	start := "2026-06-01T00:00:00Z"
+	end := "2026-06-08T00:00:00Z"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("start_date"); got != start {
+			t.Fatalf("start_date = %q, want %q", got, start)
+		}
+		if got := r.URL.Query().Get("end_date"); got != end {
+			t.Fatalf("end_date = %q, want %q", got, end)
+		}
+		json.NewEncoder(w).Encode([]TogglTimeEntry{})
+	}))
+	defer server.Close()
+	togglBaseURL = server.URL + "/api/"
+
+	cmd := fillEmptyDescriptionsCmd()
+	cmd.SetArgs([]string{"--start", start, "--end", end})
+	if _, err := captureStdout(func() error { return cmd.Execute() }); err != nil {
+		t.Fatalf("fill-empty-descriptions with explicit range returned error: %v", err)
+	}
+
+	cmd = fillEmptyDescriptionsCmd()
+	cmd.SetArgs([]string{"--start", start})
+	_, err := captureStdout(func() error { return cmd.Execute() })
+	if err == nil {
+		t.Fatal("fill-empty-descriptions should reject one-sided range flags")
+	}
+	if !strings.Contains(err.Error(), "--start and --end must be provided together") {
+		t.Fatalf("error = %q, want paired range flag message", err.Error())
+	}
+
+	cmd = fillEmptyDescriptionsCmd()
+	cmd.SetArgs([]string{"--start", "not-a-date", "--end", end})
+	_, err = captureStdout(func() error { return cmd.Execute() })
+	if err == nil {
+		t.Fatal("fill-empty-descriptions should reject invalid RFC3339 start flag")
+	}
+	if !strings.Contains(err.Error(), "invalid --start") {
+		t.Fatalf("error = %q, want invalid --start message", err.Error())
+	}
+}
+
+func TestIsFillableEmptyDescriptionEntryRequiresBlankDescriptionAndClosedWindow(t *testing.T) {
+	start := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	stop := start.Add(time.Hour)
+
+	cases := []struct {
+		name  string
+		entry TogglTimeEntry
+		want  bool
+	}{
+		{name: "empty stopped", entry: TogglTimeEntry{Start: start, Stop: stop}, want: true},
+		{name: "whitespace stopped", entry: TogglTimeEntry{Start: start, Stop: stop, Description: " \n\t "}, want: true},
+		{name: "described stopped", entry: TogglTimeEntry{Start: start, Stop: stop, Description: "Already done"}, want: false},
+		{name: "no stop", entry: TogglTimeEntry{Start: start}, want: false},
+		{name: "stop before start", entry: TogglTimeEntry{Start: start, Stop: start.Add(-time.Minute)}, want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isFillableEmptyDescriptionEntry(tc.entry); got != tc.want {
+				t.Fatalf("isFillableEmptyDescriptionEntry() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFillEmptyDescriptionsConfirmsUpdatesAndReportsCounts(t *testing.T) {
+	oldCfg, oldTogglBase := cfg, togglBaseURL
+	defer func() { cfg, togglBaseURL = oldCfg, oldTogglBase }()
+	cfg = Config{}
+	cfg.Toggl.WorkspaceID = 123
+
+	start := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	entries := []TogglTimeEntry{
+		{ID: 1, Workspace: 123, Project: 10, Start: start, Stop: start.Add(time.Hour)},
+		{ID: 2, Workspace: 123, Project: 10, Start: start, Stop: start.Add(time.Hour), Description: "Already filled"},
+		{ID: 3, Workspace: 123, Project: 10, Start: start, Stop: start.Add(time.Hour), Description: "  "},
+		{ID: 4, Workspace: 123, Project: 10, Start: start},
+		{ID: 5, Workspace: 123, Project: 10, Start: start, Stop: start.Add(time.Hour)},
+	}
+	var updated []TogglTimeEntry
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/me/time_entries":
+			json.NewEncoder(w).Encode(entries)
+		case r.Method == "PUT" && r.URL.Path == "/api/workspaces/123/time_entries/1":
+			var entry TogglTimeEntry
+			if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
+				t.Fatalf("failed to decode update body: %v", err)
+			}
+			updated = append(updated, entry)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+	togglBaseURL = server.URL + "/api/"
+
+	cmd := fillEmptyDescriptionsCmd()
+	cmd.SetArgs([]string{"--start", "2026-06-01T00:00:00Z", "--end", "2026-06-08T00:00:00Z"})
+	output, err := captureStdoutWithStdin("Manual one\ny\nManual two\nn\n\n", func() error { return cmd.Execute() })
+	if err != nil {
+		t.Fatalf("fill-empty-descriptions returned error: %v", err)
+	}
+
+	if len(updated) != 1 {
+		t.Fatalf("updated %d entries, want 1", len(updated))
+	}
+	if got := updated[0].Description; got != "Manual one" {
+		t.Fatalf("updated description = %q, want Manual one", got)
+	}
+	for _, want := range []string{
+		"Entry 1 (2026-06-01T09:00:00Z - 2026-06-01T10:00:00Z)",
+		"Proposed description: Manual one",
+		"Skipped entry 5.",
+		"Scanned entries: 5",
+		"Blank descriptions: 4",
+		"Proposed descriptions: 2",
+		"Updated entries: 1",
+		"Skipped entries: 3",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q: %q", want, output)
+		}
+	}
+}
+
 func captureStdout(fn func() error) (string, error) {
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
@@ -573,4 +753,19 @@ func captureStdout(fn func() error) (string, error) {
 		return buf.String(), err
 	}
 	return buf.String(), copyErr
+}
+
+func captureStdoutWithStdin(input string, fn func() error) (string, error) {
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		return "", err
+	}
+	if _, err := w.WriteString(input); err != nil {
+		return "", err
+	}
+	w.Close()
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+	return captureStdout(fn)
 }

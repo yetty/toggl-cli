@@ -795,10 +795,13 @@ func buildPromptText(commits []string, worklog string) string {
 }
 
 func promptManualDescription(prompt string) string {
+	return promptManualDescriptionFromReader(prompt, bufio.NewReader(os.Stdin))
+}
+
+func promptManualDescriptionFromReader(prompt string, reader *bufio.Reader) string {
 	fmt.Print(prompt)
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Scan()
-	summary := strings.TrimSpace(scanner.Text())
+	line, _ := reader.ReadString('\n')
+	summary := strings.TrimSpace(line)
 	if summary == "" {
 		fmt.Println("Skipped description.")
 	}
@@ -806,8 +809,12 @@ func promptManualDescription(prompt string) string {
 }
 
 func getDescription(promptText string) string {
+	return getDescriptionFromReader(promptText, bufio.NewReader(os.Stdin))
+}
+
+func getDescriptionFromReader(promptText string, reader *bufio.Reader) string {
 	if strings.TrimSpace(promptText) == "" {
-		return promptManualDescription("No commits or work log entries found. Enter description manually (or press Enter to skip): ")
+		return promptManualDescriptionFromReader("No commits or work log entries found. Enter description manually (or press Enter to skip): ", reader)
 	}
 
 	prompt := fmt.Sprintf("Summarize these git commits and work log:\n\n%s", promptText)
@@ -815,7 +822,7 @@ func getDescription(promptText string) string {
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		fmt.Printf("\nCollected data:\n%s\n\n", promptText)
-		summary = promptManualDescription("AI summarization failed. Enter description manually (or press Enter to skip): ")
+		summary = promptManualDescriptionFromReader("AI summarization failed. Enter description manually (or press Enter to skip): ", reader)
 		if summary == "" {
 			fmt.Println("Skipped description. Check your OpenAI API key in ~/.toggl.yaml")
 		}
@@ -904,6 +911,99 @@ func listTimeEntries(start, end string) ([]TogglTimeEntry, error) {
 		return nil, err
 	}
 	return entries, nil
+}
+
+func isFillableEmptyDescriptionEntry(entry TogglTimeEntry) bool {
+	return strings.TrimSpace(entry.Description) == "" && !entry.Stop.IsZero() && entry.Stop.After(entry.Start)
+}
+
+func confirmBackfillDescription(reader *bufio.Reader) bool {
+	fmt.Print("Save this description? [y/N]: ")
+	line, _ := reader.ReadString('\n')
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes"
+}
+
+func fillEmptyDescriptionsCmd() *cobra.Command {
+	var startDate, endDate string
+	cmd := &cobra.Command{
+		Use:   "fill-empty-descriptions",
+		Short: "Find empty Toggl descriptions and propose replacements",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if (startDate == "") != (endDate == "") {
+				return fmt.Errorf("--start and --end must be provided together")
+			}
+			if startDate == "" {
+				now := nowFunc()
+				startDate = now.AddDate(0, 0, -7).Format(time.RFC3339)
+				endDate = now.Format(time.RFC3339)
+			}
+			if _, err := time.Parse(time.RFC3339, startDate); err != nil {
+				return fmt.Errorf("invalid --start: %w", err)
+			}
+			if _, err := time.Parse(time.RFC3339, endDate); err != nil {
+				return fmt.Errorf("invalid --end: %w", err)
+			}
+
+			entries, err := listTimeEntries(startDate, endDate)
+			if err != nil {
+				return err
+			}
+
+			reader := bufio.NewReader(os.Stdin)
+			scanned := len(entries)
+			blank := 0
+			proposed := 0
+			updated := 0
+			skipped := 0
+
+			for _, entry := range entries {
+				if strings.TrimSpace(entry.Description) != "" {
+					continue
+				}
+				blank++
+				if !isFillableEmptyDescriptionEntry(entry) {
+					skipped++
+					continue
+				}
+
+				commits := collectCommits(entry)
+				promptText := buildPromptText(commits, "")
+				description := getDescriptionFromReader(promptText, reader)
+				if description == "" {
+					fmt.Printf("Skipped entry %d.\n", entry.ID)
+					skipped++
+					continue
+				}
+
+				proposed++
+				fmt.Printf("Entry %d (%s - %s)\n", entry.ID, entry.Start.Format(time.RFC3339), entry.Stop.Format(time.RFC3339))
+				fmt.Printf("Proposed description: %s\n", description)
+				if !confirmBackfillDescription(reader) {
+					skipped++
+					continue
+				}
+
+				if err := updateEntryDescription(entry, description); err != nil {
+					return err
+				}
+				updated++
+			}
+
+			if blank == 0 {
+				fmt.Println("No empty descriptions found.")
+			}
+			fmt.Printf("Scanned entries: %d\n", scanned)
+			fmt.Printf("Blank descriptions: %d\n", blank)
+			fmt.Printf("Proposed descriptions: %d\n", proposed)
+			fmt.Printf("Updated entries: %d\n", updated)
+			fmt.Printf("Skipped entries: %d\n", skipped)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&startDate, "start", "", "start date/time to scan (RFC3339)")
+	cmd.Flags().StringVar(&endDate, "end", "", "end date/time to scan (RFC3339)")
+	return cmd
 }
 
 // --- Commands ---
@@ -1187,7 +1287,7 @@ func logCmd() *cobra.Command {
 
 func rootCmd() *cobra.Command {
 	root := &cobra.Command{Use: "toggl", Version: version}
-	root.AddCommand(startCmd(), stopCmd(), trackCmd(), logCmd(), whoamiCmd(), projectsCmd(), repairSummariesCmd())
+	root.AddCommand(startCmd(), stopCmd(), trackCmd(), logCmd(), whoamiCmd(), projectsCmd(), repairSummariesCmd(), fillEmptyDescriptionsCmd())
 	return root
 }
 

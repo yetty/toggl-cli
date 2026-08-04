@@ -9,6 +9,7 @@ This tool allows you to:
 * Log work activities during your session.
 * Automatically collect Git commits between timer start/stop.
 * Generate a summary of commits and work logs via OpenAI and save it to the time entry.
+* Find recent Toggl entries with empty descriptions and propose summaries for them.
 * View current Toggl user info.
 * List all projects in your workspace.
 
@@ -20,6 +21,7 @@ This tool allows you to:
 * **Calendar workload status**: `toggl track` reports current calendar budget progress plus next-month planned work against the expected monthly hours.
 * **Work logging**: `toggl log` saves work activities for session summarization.
 * **Commit summarization**: `stop` generates AI summary of Git commits and work logs.
+* **Empty description backfill**: `fill-empty-descriptions` scans recent entries with blank descriptions, proposes summaries, and saves only confirmed updates.
 * **User info**: `toggl whoami` prints current Toggl user ID and email.
 * **Project listing**: `toggl projects` lists all projects in the workspace with IDs.
 
@@ -57,6 +59,7 @@ toggl start
 toggl track
 toggl log "Working on feature X"
 toggl stop
+toggl fill-empty-descriptions
 toggl projects
 toggl whoami
 ```
@@ -124,8 +127,11 @@ calendar:
 | `toggl track`    | Show current calendar workload budget status.                 |
 | `toggl log`      | Log a work activity message for the current session.          |
 | `toggl stop`     | Stop the current timer, summarize commits and logs, save to Toggl. |
+| `toggl fill-empty-descriptions` | Scan empty descriptions from the last 7 days by default and propose confirmed updates. |
 | `toggl whoami`   | Show current Toggl user info.                                 |
 | `toggl projects` | List all projects in the workspace with IDs.                  |
+
+`toggl fill-empty-descriptions` accepts optional `--start` and `--end` RFC3339 flags for an explicit scan range. Provide both flags together, or omit both to scan the last 7 days.
 
 ---
 
