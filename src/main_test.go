@@ -1181,6 +1181,90 @@ func TestFetchForgejoCommitsPagesUntilWindowExhausted(t *testing.T) {
 	}
 }
 
+func TestCollectForgejoActivityBuildsSplitAndPromptViews(t *testing.T) {
+	oldCfg, oldRemote := cfg, gitRemoteURL
+	defer func() { cfg, gitRemoteURL = oldCfg, oldRemote }()
+
+	entry := TogglTimeEntry{
+		Start: time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC),
+		Stop:  time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC),
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/repos/voicesense/voicesense-backend/commits":
+			json.NewEncoder(w).Encode([]map[string]any{{
+				"sha": "a",
+				"commit": map[string]any{
+					"message":   "feat: quota checks",
+					"author":    map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-09T10:30:00Z"},
+					"committer": map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-09T10:30:00Z"},
+				},
+				"author": map[string]any{"login": "juda"},
+			}})
+		case r.URL.Path == "/api/v1/repos/issues/search":
+			json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"number":       12,
+					"title":        "Persist quota decisions",
+					"updated_at":   "2026-06-09T11:00:00Z",
+					"pull_request": map[string]any{"merged": false},
+					"repository":   map[string]any{"full_name": "voicesense/voicesense-backend"},
+				},
+				{
+					"number":     45,
+					"title":      "Retry backoff",
+					"updated_at": "2026-06-09T11:30:00Z",
+					"repository": map[string]any{"full_name": "voicesense/voicesense-backend"},
+				},
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg = Config{}
+	cfg.Git.User = `Juda Kaleta\|juda@example.com\|Forgejo Actions`
+	cfg.Forgejo.URL = server.URL
+	cfg.Forgejo.APIKey = "token"
+	cfg.Projects = map[string]ProjectConfig{
+		"voicesense": {ProjectID: 204198137, Repositories: []string{"/repos/voicesense-backend"}},
+	}
+	gitRemoteURL = func(repo string) (string, error) {
+		return "https://127.0.0.1/voicesense/voicesense-backend.git", nil
+	}
+
+	activity := collectForgejoActivity(entry)
+
+	if len(activity.SplitCommits) != 3 {
+		t.Fatalf("SplitCommits = %d, want 3 (1 commit + 1 PR + 1 issue): %+v", len(activity.SplitCommits), activity.SplitCommits)
+	}
+	for _, commit := range activity.SplitCommits {
+		if commit.ProjectID != 204198137 {
+			t.Fatalf("split commit missing project mapping: %+v", commit)
+		}
+	}
+
+	joined := strings.Join(activity.PromptSections, "\n")
+	for _, want := range []string{"Forgejo commits:", "feat: quota checks", "Forgejo pull requests:", "[PR #12] Persist quota decisions", "Forgejo issues:", "[Issue #45] Retry backoff"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("PromptSections missing %q: %q", want, joined)
+		}
+	}
+}
+
+func TestCollectForgejoActivityDisabledMakesNoRequests(t *testing.T) {
+	oldCfg := cfg
+	defer func() { cfg = oldCfg }()
+	cfg = Config{}
+
+	activity := collectForgejoActivity(TogglTimeEntry{})
+	if len(activity.SplitCommits) != 0 || len(activity.PromptSections) != 0 {
+		t.Fatalf("disabled integration should return empty activity: %+v", activity)
+	}
+}
+
 func TestForgejoRequestReturnsErrorOnFailureStatus(t *testing.T) {
 	oldCfg := cfg
 	defer func() { cfg = oldCfg }()

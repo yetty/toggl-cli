@@ -628,6 +628,81 @@ func fetchForgejoIssues(entry TogglTimeEntry, repos []ForgejoRepo) ([]forgejoIss
 	return result, nil
 }
 
+type ForgejoActivity struct {
+	SplitCommits   []ProjectCommit
+	PromptSections []string
+}
+
+func collectForgejoActivity(entry TogglTimeEntry) ForgejoActivity {
+	if !cfg.Forgejo.Enabled() {
+		return ForgejoActivity{}
+	}
+	repos := resolveForgejoRepositories()
+	if len(repos) == 0 {
+		return ForgejoActivity{}
+	}
+
+	byName := map[string]ForgejoRepo{}
+	for _, repo := range repos {
+		byName[strings.ToLower(repo.FullName())] = repo
+	}
+
+	var activity ForgejoActivity
+	var commitLines []string
+	for _, repo := range repos {
+		commits, err := fetchForgejoCommits(entry, repo)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: skipping Forgejo repository %s (%v)\n", repo.FullName(), err)
+			continue
+		}
+		for _, commit := range commits {
+			commitLines = append(commitLines, fmt.Sprintf("Forgejo repository: %s\n%s", repo.FullName(), commit.Subject))
+			if commit.ProjectID != 0 {
+				activity.SplitCommits = append(activity.SplitCommits, commit)
+			}
+		}
+	}
+	if len(commitLines) > 0 {
+		activity.PromptSections = append(activity.PromptSections, "Forgejo commits:\n"+strings.Join(commitLines, "\n\n"))
+	}
+
+	issues, err := fetchForgejoIssues(entry, repos)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: skipping Forgejo issues and pull requests (%v)\n", err)
+		return activity
+	}
+
+	var issueLines, pullLines []string
+	for _, item := range issues {
+		label := fmt.Sprintf("Issue #%d", item.Number)
+		if item.PullRequest != nil {
+			label = fmt.Sprintf("PR #%d", item.Number)
+		}
+		line := fmt.Sprintf("[%s] %s", label, item.Title)
+		if item.PullRequest != nil {
+			pullLines = append(pullLines, line)
+		} else {
+			issueLines = append(issueLines, line)
+		}
+		if repo, ok := byName[strings.ToLower(item.Repository.FullName)]; ok && repo.ProjectID != 0 {
+			activity.SplitCommits = append(activity.SplitCommits, ProjectCommit{
+				ProjectName: repo.ProjectName,
+				ProjectID:   repo.ProjectID,
+				RepoName:    repo.Name,
+				Subject:     line,
+				Time:        item.UpdatedAt,
+			})
+		}
+	}
+	if len(pullLines) > 0 {
+		activity.PromptSections = append(activity.PromptSections, "Forgejo pull requests:\n"+strings.Join(pullLines, "\n"))
+	}
+	if len(issueLines) > 0 {
+		activity.PromptSections = append(activity.PromptSections, "Forgejo issues:\n"+strings.Join(issueLines, "\n"))
+	}
+	return activity
+}
+
 func currentMonthBounds(now time.Time) (time.Time, time.Time) {
 	loc := now.Location()
 	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
