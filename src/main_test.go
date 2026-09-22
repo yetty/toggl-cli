@@ -132,6 +132,7 @@ func TestDedupeCommitsRemovesCrossSourceDuplicates(t *testing.T) {
 	commits := []ProjectCommit{
 		{ProjectName: "voicesense", ProjectID: 1, RepoName: "svc", Subject: "feat: same", Time: when},
 		{ProjectName: "voicesense", ProjectID: 1, RepoName: "svc", Subject: "feat: same", Time: when},
+		{ProjectName: "voicesense", ProjectID: 1, RepoName: "other", Subject: "feat: same", Time: when},
 		{ProjectName: "voicesense", ProjectID: 1, RepoName: "svc", Subject: "feat: other", Time: when},
 	}
 	deduped := dedupeCommits(commits)
@@ -588,6 +589,85 @@ func TestStopCommandIncludesForgejoActivityInPrompt(t *testing.T) {
 	}
 	if !strings.Contains(capturedPrompt, "Forgejo commits:") || !strings.Contains(capturedPrompt, "feat: remote quota checks") {
 		t.Fatalf("prompt missing Forgejo activity: %q", capturedPrompt)
+	}
+}
+
+func TestStopCommandSplitsUsingForgejoOnlyCommits(t *testing.T) {
+	oldCfg, oldTogglBase, oldOpenAIBase, oldNow, oldRemote := cfg, togglBaseURL, openAIBaseURL, nowFunc, gitRemoteURL
+	defer func() {
+		cfg, togglBaseURL, openAIBaseURL, nowFunc, gitRemoteURL = oldCfg, oldTogglBase, oldOpenAIBase, oldNow, oldRemote
+	}()
+
+	nowFunc = func() time.Time { return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC) }
+	cfg = Config{}
+	cfg.Toggl.WorkspaceID = 123
+	cfg.OpenAI.Model = "test"
+	cfg.Git.User = `juda@example.com`
+	cfg.Forgejo.APIKey = "token"
+	cfg.Projects = map[string]ProjectConfig{
+		"voicesense": {ProjectID: 204198137, Repositories: []string{"/nonexistent/repo"}},
+	}
+	gitRemoteURL = func(repo string) (string, error) {
+		return "https://127.0.0.1/voicesense/voicesense-backend.git", nil
+	}
+
+	var capturedPrompt string
+	var updatedEntry TogglTimeEntry
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/me/time_entries/current":
+			json.NewEncoder(w).Encode(TogglTimeEntry{ID: 99, Workspace: 123, Project: 10, Start: time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)})
+		case r.Method == "PUT" && r.URL.Path == "/api/workspaces/123/time_entries/99":
+			json.NewDecoder(r.Body).Decode(&updatedEntry)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == "POST" && r.URL.Path == "/openai":
+			var request struct {
+				Messages []struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			json.NewDecoder(r.Body).Decode(&request)
+			for _, message := range request.Messages {
+				if message.Role == "user" {
+					capturedPrompt = message.Content
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": "Shipped Forgejo work"}}}})
+		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/voicesense/voicesense-backend/commits":
+			json.NewEncoder(w).Encode([]map[string]any{{
+				"sha": "a",
+				"commit": map[string]any{
+					"message":   "feat: forgejo only",
+					"author":    map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-09T10:30:00Z"},
+					"committer": map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-09T10:30:00Z"},
+				},
+				"author": map[string]any{"login": "juda"},
+			}})
+		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/issues/search":
+			json.NewEncoder(w).Encode([]map[string]any{})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	togglBaseURL = server.URL + "/api/"
+	openAIBaseURL = server.URL + "/openai"
+	cfg.Forgejo.URL = server.URL
+
+	_, err := captureStdout(func() error { return stopCmd().RunE(stopCmd(), nil) })
+	if err != nil {
+		t.Fatalf("stop command returned error: %v", err)
+	}
+	if !strings.Contains(capturedPrompt, "feat: forgejo only") {
+		t.Fatalf("split prompt missing Forgejo commit: %q", capturedPrompt)
+	}
+	if updatedEntry.Project != 204198137 {
+		t.Fatalf("updated entry project = %d, want 204198137 (no phantom split)", updatedEntry.Project)
+	}
+	if updatedEntry.Description != "Shipped Forgejo work" {
+		t.Fatalf("updated description = %q, want the AI result", updatedEntry.Description)
 	}
 }
 

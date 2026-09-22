@@ -1139,6 +1139,8 @@ func dedupeCommits(commits []ProjectCommit) []ProjectCommit {
 	seen := map[string]bool{}
 	var result []ProjectCommit
 	for _, commit := range commits {
+		// Key intentionally omits RepoName: identical (project, time, subject)
+		// entries from local git and Forgejo describe the same commit.
 		key := fmt.Sprintf("%d\x00%s\x00%s", commit.ProjectID, commit.Time.UTC().Format(time.RFC3339), commit.Subject)
 		if seen[key] {
 			continue
