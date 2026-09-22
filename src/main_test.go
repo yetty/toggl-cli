@@ -876,6 +876,96 @@ func TestResolveForgejoRepositoriesUpgradesMappingForExplicitEntry(t *testing.T)
 	}
 }
 
+func TestFetchForgejoCommitsFiltersByAuthorAndWindow(t *testing.T) {
+	oldCfg := cfg
+	defer func() { cfg = oldCfg }()
+
+	cfg = Config{}
+	cfg.Forgejo.URL = "http://placeholder"
+	cfg.Forgejo.APIKey = "token"
+	cfg.Git.User = `Juda Kaleta\|juda@example.com\|Forgejo Actions`
+
+	entry := TogglTimeEntry{
+		Start: time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC),
+		Stop:  time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC),
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "token token" {
+			t.Fatalf("Authorization = %q, want %q", got, "token token")
+		}
+		if r.URL.Path != "/api/v1/repos/voicesense/voicesense-backend/commits" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"sha": "a",
+				"commit": map[string]any{
+					"message":   "feat: quota checks\n\nmore detail",
+					"author":    map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-09T10:30:00Z"},
+					"committer": map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-09T10:30:00Z"},
+				},
+				"author": map[string]any{"login": "juda"},
+			},
+			{
+				"sha": "b",
+				"commit": map[string]any{
+					"message":   "chore: other person",
+					"author":    map[string]any{"name": "Someone Else", "email": "other@example.com", "date": "2026-06-09T10:45:00Z"},
+					"committer": map[string]any{"name": "Someone Else", "email": "other@example.com", "date": "2026-06-09T10:45:00Z"},
+				},
+				"author": map[string]any{"login": "other"},
+			},
+			{
+				"sha": "c",
+				"commit": map[string]any{
+					"message":   "feat: outside window",
+					"author":    map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-08T09:00:00Z"},
+					"committer": map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-08T09:00:00Z"},
+				},
+				"author": map[string]any{"login": "juda"},
+			},
+		})
+	}))
+	defer server.Close()
+	cfg.Forgejo.URL = server.URL
+
+	repo := ForgejoRepo{Owner: "voicesense", Name: "voicesense-backend", ProjectName: "voicesense", ProjectID: 204198137}
+	commits, err := fetchForgejoCommits(entry, repo)
+	if err != nil {
+		t.Fatalf("fetchForgejoCommits returned error: %v", err)
+	}
+	if len(commits) != 1 {
+		t.Fatalf("got %d commits, want 1: %+v", len(commits), commits)
+	}
+	if commits[0].Subject != "feat: quota checks" {
+		t.Fatalf("subject = %q, want first line only", commits[0].Subject)
+	}
+	if commits[0].ProjectID != 204198137 || commits[0].RepoName != "voicesense-backend" {
+		t.Fatalf("mapping = %d/%q, want 204198137/voicesense-backend", commits[0].ProjectID, commits[0].RepoName)
+	}
+	if !commits[0].Time.Equal(time.Date(2026, 6, 9, 10, 30, 0, 0, time.UTC)) {
+		t.Fatalf("time = %s, want committer date", commits[0].Time)
+	}
+}
+
+func TestMatchesForgejoAuthor(t *testing.T) {
+	oldCfg := cfg
+	defer func() { cfg = oldCfg }()
+	cfg = Config{}
+	cfg.Git.User = `Juda Kaleta\|juda@example.com\|Forgejo Actions`
+
+	if !matchesForgejoAuthor("Juda Kaleta", "juda@example.com", "juda") {
+		t.Fatal("expected token match by name")
+	}
+	if !matchesForgejoAuthor("Forgejo Actions", "bot@example.com", "") {
+		t.Fatal("expected token match for automation author name")
+	}
+	if matchesForgejoAuthor("Someone Else", "other@example.com", "other") {
+		t.Fatal("unexpected match for unrelated author")
+	}
+}
+
 func captureStdout(fn func() error) (string, error) {
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()

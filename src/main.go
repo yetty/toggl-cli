@@ -441,6 +441,133 @@ func forgejoRepoFromLocalPath(path, host string) (string, string, bool) {
 	return parseForgejoRemote(remote, host)
 }
 
+const forgejoPageSize = 50
+
+const forgejoMaxPages = 10
+
+type forgejoCommitUser struct {
+	Name  string    `json:"name"`
+	Email string    `json:"email"`
+	Date  time.Time `json:"date"`
+}
+
+type forgejoCommit struct {
+	SHA    string `json:"sha"`
+	Commit struct {
+		Message   string            `json:"message"`
+		Author    forgejoCommitUser `json:"author"`
+		Committer forgejoCommitUser `json:"committer"`
+	} `json:"commit"`
+	Author *struct {
+		Login string `json:"login"`
+	} `json:"author"`
+}
+
+func forgejoAPIBase() string {
+	return strings.TrimRight(cfg.Forgejo.URL, "/") + "/api/v1/"
+}
+
+func forgejoRequest(path string) ([]byte, error) {
+	req, err := http.NewRequest("GET", forgejoAPIBase()+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "token "+cfg.Forgejo.APIKey)
+	req.Header.Set("Accept", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("Forgejo API error: %s", resp.Status)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func forgejoAuthorTokens() []string {
+	tokens := []string{}
+	for _, token := range strings.Split(cfg.Git.User, `\|`) {
+		token = strings.ToLower(strings.TrimSpace(token))
+		if token != "" {
+			tokens = append(tokens, token)
+		}
+	}
+	return tokens
+}
+
+func matchesForgejoAuthor(name, email, login string) bool {
+	name = strings.ToLower(name)
+	email = strings.ToLower(email)
+	login = strings.ToLower(login)
+	for _, token := range forgejoAuthorTokens() {
+		if login != "" && login == token {
+			return true
+		}
+		if name != "" && strings.Contains(name, token) {
+			return true
+		}
+		if email != "" && strings.Contains(email, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func firstLine(value string) string {
+	if i := strings.IndexByte(value, '\n'); i >= 0 {
+		return strings.TrimSpace(value[:i])
+	}
+	return strings.TrimSpace(value)
+}
+
+func fetchForgejoCommits(entry TogglTimeEntry, repo ForgejoRepo) ([]ProjectCommit, error) {
+	var commits []ProjectCommit
+	for page := 1; page <= forgejoMaxPages; page++ {
+		path := fmt.Sprintf("repos/%s/%s/commits?limit=%d&page=%d&stat=false&verification=false&files=false",
+			url.PathEscape(repo.Owner), url.PathEscape(repo.Name), forgejoPageSize, page)
+		data, err := forgejoRequest(path)
+		if err != nil {
+			return nil, err
+		}
+		var items []forgejoCommit
+		if err := json.Unmarshal(data, &items); err != nil {
+			return nil, err
+		}
+		if len(items) == 0 {
+			break
+		}
+		oldest := items[len(items)-1].Commit.Committer.Date
+		for _, item := range items {
+			committedAt := item.Commit.Committer.Date
+			if committedAt.Before(entry.Start) || committedAt.After(entry.Stop) {
+				continue
+			}
+			login := ""
+			if item.Author != nil {
+				login = item.Author.Login
+			}
+			if !matchesForgejoAuthor(item.Commit.Author.Name, item.Commit.Author.Email, login) {
+				continue
+			}
+			commits = append(commits, ProjectCommit{
+				ProjectName: repo.ProjectName,
+				ProjectID:   repo.ProjectID,
+				RepoName:    repo.Name,
+				Subject:     firstLine(item.Commit.Message),
+				Time:        committedAt,
+			})
+		}
+		if len(items) < forgejoPageSize || oldest.Before(entry.Start) {
+			break
+		}
+		if page == forgejoMaxPages {
+			fmt.Fprintf(os.Stderr, "Warning: Forgejo commits for %s truncated at %d pages\n", repo.FullName(), forgejoMaxPages)
+		}
+	}
+	return commits, nil
+}
+
 func currentMonthBounds(now time.Time) (time.Time, time.Time) {
 	loc := now.Location()
 	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
