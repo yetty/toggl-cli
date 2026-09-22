@@ -1125,6 +1125,30 @@ func filterProjectCommits(commits []ProjectCommit, split ProjectSplit) []Project
 	return filtered
 }
 
+func filterMappedCommits(commits []ProjectCommit) []ProjectCommit {
+	var filtered []ProjectCommit
+	for _, commit := range commits {
+		if commit.ProjectID != 0 {
+			filtered = append(filtered, commit)
+		}
+	}
+	return filtered
+}
+
+func dedupeCommits(commits []ProjectCommit) []ProjectCommit {
+	seen := map[string]bool{}
+	var result []ProjectCommit
+	for _, commit := range commits {
+		key := fmt.Sprintf("%d\x00%s\x00%s", commit.ProjectID, commit.Time.UTC().Format(time.RFC3339), commit.Subject)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, commit)
+	}
+	return result
+}
+
 func describeProjectSplits(splits []ProjectSplit, commits []ProjectCommit) ([]ProjectSplit, bool) {
 	for i, split := range splits {
 		projectCommits := filterProjectCommits(commits, split)
@@ -1565,6 +1589,7 @@ func stopCmd() *cobra.Command {
 				calendarStatus, calendarErr = loadWorkloadStatus()
 			}
 
+			activity := collectForgejoActivity(entry)
 			var projectCommits []ProjectCommit
 			if len(cfg.Projects) > 0 {
 				projectCommits = collectProjectCommits(entry)
@@ -1572,10 +1597,12 @@ func stopCmd() *cobra.Command {
 			worklog := readWorklog()
 
 			if len(cfg.Projects) > 0 {
-				splits := calculateProjectSplits(entry, projectCommits)
+				combined := dedupeCommits(append(append([]ProjectCommit(nil), projectCommits...), activity.SplitCommits...))
+				mappedCommits := filterMappedCommits(combined)
+				splits := calculateProjectSplits(entry, mappedCommits)
 				if len(splits) > 0 {
 					var ok bool
-					splits, ok = describeProjectSplits(splits, projectCommits)
+					splits, ok = describeProjectSplits(splits, mappedCommits)
 					if !ok {
 						os.Remove(worklogPath())
 						fmt.Println("Stopped tracking. No summary saved.")
@@ -1598,7 +1625,7 @@ func stopCmd() *cobra.Command {
 			}
 
 			commits := collectCommits(entry)
-			promptText := buildPromptText(commits, worklog)
+			promptText := buildPromptTextWithSections(commits, activity.PromptSections, worklog)
 			description := getDescription(promptText)
 			if description == "" {
 				os.Remove(worklogPath())

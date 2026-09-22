@@ -116,6 +116,30 @@ func TestBuildPromptTextWithSectionsOrdering(t *testing.T) {
 	}
 }
 
+func TestFilterMappedCommitsDropsUnmapped(t *testing.T) {
+	commits := []ProjectCommit{
+		{ProjectName: "a", ProjectID: 1, Subject: "kept"},
+		{ProjectName: "", ProjectID: 0, Subject: "dropped"},
+	}
+	filtered := filterMappedCommits(commits)
+	if len(filtered) != 1 || filtered[0].Subject != "kept" {
+		t.Fatalf("filtered = %+v, want only mapped commit", filtered)
+	}
+}
+
+func TestDedupeCommitsRemovesCrossSourceDuplicates(t *testing.T) {
+	when := time.Date(2026, 6, 9, 10, 30, 0, 0, time.UTC)
+	commits := []ProjectCommit{
+		{ProjectName: "voicesense", ProjectID: 1, RepoName: "svc", Subject: "feat: same", Time: when},
+		{ProjectName: "voicesense", ProjectID: 1, RepoName: "svc", Subject: "feat: same", Time: when},
+		{ProjectName: "voicesense", ProjectID: 1, RepoName: "svc", Subject: "feat: other", Time: when},
+	}
+	deduped := dedupeCommits(commits)
+	if len(deduped) != 2 {
+		t.Fatalf("deduped %d commits, want 2: %+v", len(deduped), deduped)
+	}
+}
+
 func TestFetchForgejoIssuesFiltersToResolvedRepositories(t *testing.T) {
 	oldCfg := cfg
 	defer func() { cfg = oldCfg }()
@@ -497,6 +521,73 @@ func TestStopCommandPrintsNoCalendarOutputWhenUnconfigured(t *testing.T) {
 	}
 	if strings.Contains(output, "Calendar workload") {
 		t.Fatalf("unexpected calendar output when unconfigured: %q", output)
+	}
+}
+
+func TestStopCommandIncludesForgejoActivityInPrompt(t *testing.T) {
+	oldCfg, oldTogglBase, oldOpenAIBase, oldNow, oldRemote := cfg, togglBaseURL, openAIBaseURL, nowFunc, gitRemoteURL
+	defer func() {
+		cfg, togglBaseURL, openAIBaseURL, nowFunc, gitRemoteURL = oldCfg, oldTogglBase, oldOpenAIBase, oldNow, oldRemote
+	}()
+
+	nowFunc = func() time.Time { return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC) }
+	cfg = Config{}
+	cfg.Toggl.WorkspaceID = 123
+	cfg.OpenAI.Model = "test"
+	cfg.Git.User = `Juda Kaleta\|juda@example.com`
+	cfg.Forgejo.APIKey = "token"
+	cfg.Forgejo.Repositories = []string{"voicesense/voicesense-backend"}
+	cfg.Repositories = nil
+
+	var capturedPrompt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/me/time_entries/current":
+			json.NewEncoder(w).Encode(TogglTimeEntry{ID: 99, Workspace: 123, Project: 10, Start: time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)})
+		case r.Method == "PUT" && r.URL.Path == "/api/workspaces/123/time_entries/99":
+			w.WriteHeader(http.StatusOK)
+		case r.Method == "POST" && r.URL.Path == "/openai":
+			var request struct {
+				Messages []struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			json.NewDecoder(r.Body).Decode(&request)
+			for _, message := range request.Messages {
+				if message.Role == "user" {
+					capturedPrompt = message.Content
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": "Did remote work"}}}})
+		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/voicesense/voicesense-backend/commits":
+			json.NewEncoder(w).Encode([]map[string]any{{
+				"sha": "a",
+				"commit": map[string]any{
+					"message":   "feat: remote quota checks",
+					"author":    map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-09T10:30:00Z"},
+					"committer": map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-09T10:30:00Z"},
+				},
+				"author": map[string]any{"login": "juda"},
+			}})
+		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/issues/search":
+			json.NewEncoder(w).Encode([]map[string]any{})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	togglBaseURL = server.URL + "/api/"
+	openAIBaseURL = server.URL + "/openai"
+	cfg.Forgejo.URL = server.URL
+
+	_, err := captureStdout(func() error { return stopCmd().RunE(stopCmd(), nil) })
+	if err != nil {
+		t.Fatalf("stop command returned error: %v", err)
+	}
+	if !strings.Contains(capturedPrompt, "Forgejo commits:") || !strings.Contains(capturedPrompt, "feat: remote quota checks") {
+		t.Fatalf("prompt missing Forgejo activity: %q", capturedPrompt)
 	}
 }
 
