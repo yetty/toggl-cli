@@ -1137,6 +1137,19 @@ func TestFilterMappedCommitsDropsUnmapped(t *testing.T) {
 	}
 }
 
+func TestDedupeCommitsRemovesCrossSourceDuplicates(t *testing.T) {
+	when := time.Date(2026, 6, 9, 10, 30, 0, 0, time.UTC)
+	commits := []ProjectCommit{
+		{ProjectName: "voicesense", ProjectID: 1, RepoName: "svc", Subject: "feat: same", Time: when},
+		{ProjectName: "voicesense", ProjectID: 1, RepoName: "svc", Subject: "feat: same", Time: when},
+		{ProjectName: "voicesense", ProjectID: 1, RepoName: "svc", Subject: "feat: other", Time: when},
+	}
+	deduped := dedupeCommits(commits)
+	if len(deduped) != 2 {
+		t.Fatalf("deduped %d commits, want 2: %+v", len(deduped), deduped)
+	}
+}
+
 func TestStopCommandIncludesForgejoActivityInPrompt(t *testing.T) {
 	oldCfg, oldTogglBase, oldOpenAIBase, oldNow, oldRemote := cfg, togglBaseURL, openAIBaseURL, nowFunc, gitRemoteURL
 	defer func() {
@@ -1209,7 +1222,7 @@ func TestStopCommandIncludesForgejoActivityInPrompt(t *testing.T) {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `go test ./src/ -run 'TestFilterMappedCommitsDropsUnmapped|TestStopCommandIncludesForgejoActivityInPrompt' -v`
+Run: `go test ./src/ -run 'TestFilterMappedCommitsDropsUnmapped|TestDedupeCommitsRemovesCrossSourceDuplicates|TestStopCommandIncludesForgejoActivityInPrompt' -v`
 Expected: FAIL — `filterMappedCommits undefined`.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -1226,7 +1239,23 @@ func filterMappedCommits(commits []ProjectCommit) []ProjectCommit {
 	}
 	return filtered
 }
+
+func dedupeCommits(commits []ProjectCommit) []ProjectCommit {
+	seen := map[string]bool{}
+	var result []ProjectCommit
+	for _, commit := range commits {
+		key := fmt.Sprintf("%d\x00%s\x00%s", commit.ProjectID, commit.Time.UTC().Format(time.RFC3339), commit.Subject)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, commit)
+	}
+	return result
+}
 ```
+
+A commit that exists both locally and on Forgejo would otherwise appear twice in the split prompt; `dedupeCommits` collapses identical `(ProjectID, time, subject)` entries.
 
 In `stopCmd`, after the calendar block and before the project-commit block, add:
 
@@ -1238,7 +1267,7 @@ Change the split block to merge and filter:
 
 ```go
 			if len(cfg.Projects) > 0 {
-				combined := append(append([]ProjectCommit(nil), projectCommits...), activity.SplitCommits...)
+				combined := dedupeCommits(append(append([]ProjectCommit(nil), projectCommits...), activity.SplitCommits...))
 				splits := calculateProjectSplits(entry, filterMappedCommits(combined))
 ```
 
@@ -1253,7 +1282,7 @@ Change the non-split prompt construction to:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `go test ./src/ -run 'TestFilterMappedCommitsDropsUnmapped|TestStopCommand' -v`
+Run: `go test ./src/ -run 'TestFilterMappedCommitsDropsUnmapped|TestDedupeCommitsRemovesCrossSourceDuplicates|TestStopCommand' -v`
 Expected: PASS (including the pre-existing stop command tests).
 
 - [ ] **Step 5: Commit**

@@ -82,6 +82,7 @@ func collectForgejoActivity(entry TogglTimeEntry) ForgejoActivity
 ### Integration into `stop`
 
 - Split path: append `activity.SplitCommits` to the locally collected project commits and pass the combined slice to `calculateProjectSplits` / `describeProjectSplits`. Per-project prompts then naturally include both sources. `stop` must filter the combined slice to commits with a non-zero `ProjectID` before splitting, so unmapped Forgejo repositories cannot create phantom `ProjectID 0` splits or trigger the empty-commit manual prompt in `describeProjectSplits`.
+- Identical commits present both locally and on Forgejo are de-duplicated by `(project, time, subject)` before splitting. The non-split prompt may still repeat an identical commit line, which is accepted.
 - Non-split path: build the prompt from local commits plus `activity.PromptSections` plus the worklog.
 - `fill-empty-descriptions` and `repair-summaries`: build the prompt from local commits plus `activity.PromptSections`, so all three commands include Forgejo activity through the same helper.
 
