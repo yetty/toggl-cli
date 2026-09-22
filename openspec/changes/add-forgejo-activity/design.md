@@ -16,7 +16,8 @@ matching commits.
 - Use `GET /repos/issues/search` with `created`, `assigned`, `review_requested`, and
   `reviewed`; `since`/`before` filter by updated time, which is accepted.
 - Keep two disjoint activity views: project-mapped activity feeds time splitting, while
-  formatted sections feed non-split prompts, so an item is never duplicated within a prompt.
+  formatted sections feed non-split prompts. Within a single prompt path an item appears
+  once; the non-split prompt may still repeat an identical local and Forgejo commit line.
 - Merge local and Forgejo commits for splitting, de-duplicated by project, time, and subject.
 - Treat all Forgejo failures as warnings so summary generation always continues.
 

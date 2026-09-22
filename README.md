@@ -8,6 +8,7 @@ This tool allows you to:
 * Check calendar workload budget status on demand, including next month's planned work against the expected monthly hours.
 * Log work activities during your session.
 * Automatically collect Git commits between timer start/stop.
+* Include your Forgejo commits, pull requests, and issues in summaries when a Forgejo server is configured.
 * Generate a summary of commits and work logs via OpenAI and save it to the time entry.
 * Find recent Toggl entries with empty descriptions and propose summaries for them.
 * View current Toggl user info.
@@ -21,7 +22,7 @@ This tool allows you to:
 * **Calendar workload status**: `toggl track` reports current calendar budget progress plus next-month planned work against the expected monthly hours.
 * **Work logging**: `toggl log` saves work activities for session summarization.
 * **Commit summarization**: `stop` generates AI summary of Git commits and work logs.
-* **Forgejo activity**: when `forgejo` is configured, `stop`, `fill-empty-descriptions`, and `repair-summaries` include your commits, pull requests, and issues from the Senseloom Forgejo server in the generated summary.
+* **Forgejo activity**: when `forgejo` is configured, `stop`, `fill-empty-descriptions`, and `repair-summaries` include your commits, pull requests, and issues from your Forgejo server in the generated summary.
 * **Empty description backfill**: `fill-empty-descriptions` scans recent entries with blank descriptions, proposes summaries, and saves only confirmed updates.
 * **User info**: `toggl whoami` prints current Toggl user ID and email.
 * **Project listing**: `toggl projects` lists all projects in the workspace with IDs.
@@ -125,7 +126,7 @@ Add your Forgejo server and a personal access token to `~/.toggl.yaml`:
 
 ```yaml
 forgejo:
-  url: https://infra.senseloom.com
+  url: https://forgejo.example.com
   api_key: <personal-access-token>   # or set FORGEJO_API_KEY
   repositories:                      # optional, owner/repo, for repos without a local clone
     - voicesense/voicesense-backend
