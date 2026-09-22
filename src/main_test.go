@@ -795,6 +795,60 @@ func TestFillEmptyDescriptionsConfirmsUpdatesAndReportsCounts(t *testing.T) {
 	}
 }
 
+func TestResolveForgejoRepositoriesMergesSourcesAndMappings(t *testing.T) {
+	oldCfg, oldRemote := cfg, gitRemoteURL
+	defer func() { cfg, gitRemoteURL = oldCfg, oldRemote }()
+
+	cfg = Config{}
+	cfg.Forgejo.URL = "https://infra.senseloom.com"
+	cfg.Forgejo.APIKey = "token"
+	cfg.Forgejo.Repositories = []string{"voicesense/voicesense-backend"}
+	cfg.Repositories = []string{"/repos/legacy"}
+	cfg.Projects = map[string]ProjectConfig{
+		"cortex": {
+			ProjectID:    219802887,
+			Repositories: []string{"/repos/cortex"},
+		},
+	}
+
+	gitRemoteURL = func(repo string) (string, error) {
+		switch repo {
+		case "/repos/legacy":
+			return "https://infra.senseloom.com/voicesense/voicesense-backend.git", nil
+		case "/repos/cortex":
+			return "git@infra.senseloom.com:lkq/cortex.git", nil
+		default:
+			return "https://github.com/someone/else.git", nil
+		}
+	}
+
+	repos := resolveForgejoRepositories()
+	if len(repos) != 2 {
+		t.Fatalf("resolved %d repositories, want 2: %+v", len(repos), repos)
+	}
+
+	byName := map[string]ForgejoRepo{}
+	for _, repo := range repos {
+		byName[repo.FullName()] = repo
+	}
+
+	backend, ok := byName["voicesense/voicesense-backend"]
+	if !ok {
+		t.Fatalf("missing voicesense-backend: %+v", repos)
+	}
+	if backend.ProjectID != 0 {
+		t.Fatalf("explicit-only repository should stay unmapped, got project %d", backend.ProjectID)
+	}
+
+	cortex, ok := byName["lkq/cortex"]
+	if !ok {
+		t.Fatalf("missing lkq/cortex: %+v", repos)
+	}
+	if cortex.ProjectName != "cortex" || cortex.ProjectID != 219802887 {
+		t.Fatalf("cortex mapping = %q/%d, want cortex/219802887", cortex.ProjectName, cortex.ProjectID)
+	}
+}
+
 func captureStdout(fn func() error) (string, error) {
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()

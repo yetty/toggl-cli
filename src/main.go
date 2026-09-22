@@ -341,6 +341,106 @@ func splitOwnerRepo(value string) (string, string, bool) {
 	return parts[0], parts[1], true
 }
 
+type ForgejoRepo struct {
+	Owner       string
+	Name        string
+	ProjectName string
+	ProjectID   int
+}
+
+func (r ForgejoRepo) FullName() string {
+	return r.Owner + "/" + r.Name
+}
+
+var gitRemoteURL = func(repo string) (string, error) {
+	out, err := exec.Command("git", "-C", repo, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func forgejoHost() string {
+	if cfg.Forgejo.URL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(cfg.Forgejo.URL)
+	if err != nil || parsed.Hostname() == "" {
+		return ""
+	}
+	return strings.ToLower(parsed.Hostname())
+}
+
+func resolveForgejoRepositories() []ForgejoRepo {
+	host := forgejoHost()
+	if host == "" {
+		return nil
+	}
+
+	order := []string{}
+	byName := map[string]ForgejoRepo{}
+	add := func(owner, name, projectName string, projectID int) {
+		key := strings.ToLower(owner + "/" + name)
+		if existing, ok := byName[key]; ok {
+			if existing.ProjectID == 0 && projectID != 0 {
+				existing.ProjectName = projectName
+				existing.ProjectID = projectID
+				byName[key] = existing
+			}
+			return
+		}
+		byName[key] = ForgejoRepo{Owner: owner, Name: name, ProjectName: projectName, ProjectID: projectID}
+		order = append(order, key)
+	}
+
+	for _, full := range cfg.Forgejo.Repositories {
+		owner, name, ok := splitOwnerRepo(full)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Warning: skipping malformed forgejo repository %q (expected owner/repo)\n", full)
+			continue
+		}
+		add(owner, name, "", 0)
+	}
+
+	for _, path := range cfg.Repositories {
+		owner, name, ok := forgejoRepoFromLocalPath(expandRepoPath(path), host)
+		if !ok {
+			continue
+		}
+		add(owner, name, "", 0)
+	}
+
+	projectNames := make([]string, 0, len(cfg.Projects))
+	for name := range cfg.Projects {
+		projectNames = append(projectNames, name)
+	}
+	sort.Strings(projectNames)
+	for _, projectName := range projectNames {
+		project := cfg.Projects[projectName]
+		for _, path := range project.Repositories {
+			owner, name, ok := forgejoRepoFromLocalPath(expandRepoPath(path), host)
+			if !ok {
+				continue
+			}
+			add(owner, name, projectName, project.ProjectID)
+		}
+	}
+
+	result := make([]ForgejoRepo, 0, len(order))
+	for _, key := range order {
+		result = append(result, byName[key])
+	}
+	return result
+}
+
+func forgejoRepoFromLocalPath(path, host string) (string, string, bool) {
+	remote, err := gitRemoteURL(path)
+	if err != nil {
+		return "", "", false
+	}
+	return parseForgejoRemote(remote, host)
+}
+
 func currentMonthBounds(now time.Time) (time.Time, time.Time) {
 	loc := now.Location()
 	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
