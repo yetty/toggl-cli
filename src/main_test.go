@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -604,8 +605,9 @@ func TestStopCommandSplitsUsingForgejoOnlyCommits(t *testing.T) {
 	cfg.OpenAI.Model = "test"
 	cfg.Git.User = `juda@example.com`
 	cfg.Forgejo.APIKey = "token"
+	cfg.Forgejo.Repositories = []string{"extras/tooling"}
 	cfg.Projects = map[string]ProjectConfig{
-		"voicesense": {ProjectID: 204198137, Repositories: []string{"/nonexistent/repo"}},
+		"voicesense": {ProjectID: 204198137, Repositories: []string{filepath.Join(t.TempDir(), "repo")}},
 	}
 	gitRemoteURL = func(repo string) (string, error) {
 		return "https://127.0.0.1/voicesense/voicesense-backend.git", nil
@@ -613,6 +615,7 @@ func TestStopCommandSplitsUsingForgejoOnlyCommits(t *testing.T) {
 
 	var capturedPrompt string
 	var updatedEntry TogglTimeEntry
+	var createdEntries []TogglTimeEntry
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/api/me/time_entries/current":
@@ -644,6 +647,21 @@ func TestStopCommandSplitsUsingForgejoOnlyCommits(t *testing.T) {
 				},
 				"author": map[string]any{"login": "juda"},
 			}})
+		case r.Method == "POST" && r.URL.Path == "/api/workspaces/123/time_entries":
+			var entry TogglTimeEntry
+			json.NewDecoder(r.Body).Decode(&entry)
+			createdEntries = append(createdEntries, entry)
+			json.NewEncoder(w).Encode(TogglTimeEntry{ID: 100, Workspace: 123})
+		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/extras/tooling/commits":
+			json.NewEncoder(w).Encode([]map[string]any{{
+				"sha": "z",
+				"commit": map[string]any{
+					"message":   "chore: unmapped work",
+					"author":    map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-09T10:15:00Z"},
+					"committer": map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-09T10:15:00Z"},
+				},
+				"author": map[string]any{"login": "juda"},
+			}})
 		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/issues/search":
 			json.NewEncoder(w).Encode([]map[string]any{})
 		default:
@@ -665,6 +683,9 @@ func TestStopCommandSplitsUsingForgejoOnlyCommits(t *testing.T) {
 	}
 	if updatedEntry.Project != 204198137 {
 		t.Fatalf("updated entry project = %d, want 204198137 (no phantom split)", updatedEntry.Project)
+	}
+	if len(createdEntries) != 0 {
+		t.Fatalf("unmapped repository produced %d extra splits, want 0: %+v", len(createdEntries), createdEntries)
 	}
 	if updatedEntry.Description != "Shipped Forgejo work" {
 		t.Fatalf("updated description = %q, want the AI result", updatedEntry.Description)
