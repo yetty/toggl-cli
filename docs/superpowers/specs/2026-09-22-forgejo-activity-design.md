@@ -88,7 +88,8 @@ func collectForgejoActivity(entry TogglTimeEntry) ForgejoActivity
 ### Failure handling
 
 - Unconfigured Forgejo leaves behavior identical to today.
-- Any API, network, or remote-parse error produces a single stderr warning and processing continues with local data; `stop` never fails because of Forgejo.
+- Any Forgejo API, network, or authentication error produces a single stderr warning and processing continues with local data; `stop` never fails because of Forgejo.
+- A local repository path that cannot be inspected as a git repository (missing path, no `origin`, not a git repo) is skipped silently during Forgejo repository resolution. Local commit collection already warns about the same path, so a second warning would be noise.
 - A page cap (10 pages per repository and per search) bounds pathological repositories and warns when reached.
 - A repository without a project mapping is excluded from splits by the explicit `ProjectID` filter and still contributes summary text through `PromptSections`.
 
