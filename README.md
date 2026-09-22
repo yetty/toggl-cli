@@ -21,6 +21,7 @@ This tool allows you to:
 * **Calendar workload status**: `toggl track` reports current calendar budget progress plus next-month planned work against the expected monthly hours.
 * **Work logging**: `toggl log` saves work activities for session summarization.
 * **Commit summarization**: `stop` generates AI summary of Git commits and work logs.
+* **Forgejo activity**: when `forgejo` is configured, `stop`, `fill-empty-descriptions`, and `repair-summaries` include your commits, pull requests, and issues from the Senseloom Forgejo server in the generated summary.
 * **Empty description backfill**: `fill-empty-descriptions` scans recent entries with blank descriptions, proposes summaries, and saves only confirmed updates.
 * **User info**: `toggl whoami` prints current Toggl user ID and email.
 * **Project listing**: `toggl projects` lists all projects in the workspace with IDs.
@@ -116,6 +117,21 @@ calendar:
 * **Projects**: optional map of project names to Toggl project IDs and Git repositories. When project commits are detected during `toggl stop`, the CLI can split one stopped timer into multiple project-specific Toggl entries with contiguous time ranges.
 * **Repositories**: legacy list of Git repositories to scan for commits. This still works for summary-only behavior when `projects:` is not configured or no project commits are detected.
 * **Calendar**: optional Google Calendar workload tracking. Use a calendar that is public/shareable enough for Google Calendar API-key reads, then configure its calendar ID, exact event names to count as planned work, a fixed monthly hour budget, and the Toggl project IDs that count as actual worked time. This powers on-demand workload status checks with `toggl track`, including a next-month planned-hours line that indicates whether planned work meets the monthly budget, plus calendar hints after `start`/`stop`. When `project_ids` is omitted, the CLI falls back to configured Toggl project IDs.
+* **Forgejo**: optional Forgejo server integration. Provide the server URL and an API token (or `FORGEJO_API_KEY`) to include your commits, pull requests, and issues in summaries.
+
+### Forgejo integration (optional)
+
+Add your Forgejo server and a personal access token to `~/.toggl.yaml`:
+
+```yaml
+forgejo:
+  url: https://infra.senseloom.com
+  api_key: <personal-access-token>   # or set FORGEJO_API_KEY
+  repositories:                      # optional, owner/repo, for repos without a local clone
+    - voicesense/voicesense-backend
+```
+
+Repositories are discovered automatically from the Forgejo remotes of the paths already listed in `repositories` and `projects.<name>.repositories`. A repository listed only under a project inherits that project's Toggl project mapping and participates in time splitting; repositories without a mapping contribute to the summary text only. Forgejo errors are reported as warnings and never fail `toggl stop`.
 
 ---
 
