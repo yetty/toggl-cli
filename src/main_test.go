@@ -100,6 +100,22 @@ func TestForgejoConfigEnabledOnlyWhenRequiredFieldsPresent(t *testing.T) {
 	}
 }
 
+func TestBuildPromptTextWithSectionsOrdering(t *testing.T) {
+	text := buildPromptTextWithSections(
+		[]string{"Repository: app\nfeat: local work"},
+		[]string{"Forgejo commits:\nForgejo repository: o/r\nfeat: remote work"},
+		"worked on things",
+	)
+	for _, want := range []string{"Git commits:", "feat: local work", "Forgejo commits:", "feat: remote work", "Work log:", "worked on things"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("prompt missing %q: %q", want, text)
+		}
+	}
+	if strings.Index(text, "Forgejo commits:") < strings.Index(text, "Git commits:") {
+		t.Fatalf("Forgejo section should follow local commits: %q", text)
+	}
+}
+
 func TestFetchForgejoIssuesFiltersToResolvedRepositories(t *testing.T) {
 	oldCfg := cfg
 	defer func() { cfg = oldCfg }()

@@ -1214,10 +1214,15 @@ func readWorklog() string {
 }
 
 func buildPromptText(commits []string, worklog string) string {
+	return buildPromptTextWithSections(commits, nil, worklog)
+}
+
+func buildPromptTextWithSections(commits []string, extraSections []string, worklog string) string {
 	var sections []string
 	if len(commits) > 0 {
 		sections = append(sections, fmt.Sprintf("Git commits:\n%s", strings.Join(commits, "\n\n")))
 	}
+	sections = append(sections, extraSections...)
 	if strings.TrimSpace(worklog) != "" {
 		sections = append(sections, fmt.Sprintf("Work log:\n%s", strings.TrimSpace(worklog)))
 	}
@@ -1398,7 +1403,8 @@ func fillEmptyDescriptionsCmd() *cobra.Command {
 				}
 
 				commits := collectCommits(entry)
-				promptText := buildPromptText(commits, "")
+				activity := collectForgejoActivity(entry)
+				promptText := buildPromptTextWithSections(commits, activity.PromptSections, "")
 				description := getDescriptionFromReader(promptText, reader)
 				if description == "" {
 					fmt.Printf("Skipped entry %d.\n", entry.ID)
@@ -1665,7 +1671,8 @@ func repairSummariesCmd() *cobra.Command {
 
 				fmt.Printf("Repairing entry %d (%s - %s)\n", entry.ID, entry.Start.Format(time.RFC3339), entry.Stop.Format(time.RFC3339))
 				commits := collectCommits(entry)
-				promptText := buildPromptText(commits, "")
+				activity := collectForgejoActivity(entry)
+				promptText := buildPromptTextWithSections(commits, activity.PromptSections, "")
 				description := getDescription(promptText)
 				if description == "" {
 					fmt.Printf("Skipped entry %d.\n", entry.ID)
