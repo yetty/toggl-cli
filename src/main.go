@@ -287,6 +287,60 @@ func expandRepoPath(path string) string {
 	return filepath.Join(home, strings.TrimPrefix(path, "~/"))
 }
 
+func stripHostPort(host string) string {
+	if i := strings.LastIndex(host, ":"); i >= 0 {
+		return host[:i]
+	}
+	return host
+}
+
+func parseForgejoRemote(raw, forgejoHost string) (string, string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", false
+	}
+
+	var remoteHost, path string
+	switch {
+	case strings.Contains(raw, "://"):
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return "", "", false
+		}
+		remoteHost = parsed.Hostname()
+		path = strings.TrimPrefix(parsed.Path, "/")
+	case strings.Contains(raw, ":"):
+		i := strings.Index(raw, ":")
+		left := raw[:i]
+		path = raw[i+1:]
+		if j := strings.LastIndex(left, "@"); j >= 0 {
+			left = left[j+1:]
+		}
+		remoteHost = left
+	default:
+		return "", "", false
+	}
+
+	if !strings.EqualFold(stripHostPort(remoteHost), stripHostPort(forgejoHost)) {
+		return "", "", false
+	}
+
+	path = strings.TrimSuffix(strings.TrimSuffix(path, "/"), ".git")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+func splitOwnerRepo(value string) (string, string, bool) {
+	parts := strings.Split(strings.TrimSpace(value), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
 func currentMonthBounds(now time.Time) (time.Time, time.Time) {
 	loc := now.Location()
 	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)

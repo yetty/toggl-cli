@@ -100,6 +100,44 @@ func TestForgejoConfigEnabledOnlyWhenRequiredFieldsPresent(t *testing.T) {
 	}
 }
 
+func TestParseForgejoRemote(t *testing.T) {
+	cases := []struct {
+		name      string
+		raw       string
+		wantOwner string
+		wantName  string
+		wantOK    bool
+	}{
+		{name: "https with git suffix", raw: "https://infra.senseloom.com/voicesense/voicesense-backend.git", wantOwner: "voicesense", wantName: "voicesense-backend", wantOK: true},
+		{name: "https without suffix", raw: "https://infra.senseloom.com/voicesense/voicesense-web", wantOwner: "voicesense", wantName: "voicesense-web", wantOK: true},
+		{name: "ssh scp style", raw: "git@infra.senseloom.com:voicesense/senseloom-infra.git", wantOwner: "voicesense", wantName: "senseloom-infra", wantOK: true},
+		{name: "ssh url style", raw: "ssh://git@infra.senseloom.com/voicesense/redat-mock.git", wantOwner: "voicesense", wantName: "redat-mock", wantOK: true},
+		{name: "different host", raw: "git@github.com:yetty/toggl-cli.git", wantOK: false},
+		{name: "too few path segments", raw: "https://infra.senseloom.com/voicesense.git", wantOK: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			owner, name, ok := parseForgejoRemote(tc.raw, "infra.senseloom.com")
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if owner != tc.wantOwner || name != tc.wantName {
+				t.Fatalf("got %q/%q, want %q/%q", owner, name, tc.wantOwner, tc.wantName)
+			}
+		})
+	}
+}
+
+func TestSplitOwnerRepo(t *testing.T) {
+	owner, name, ok := splitOwnerRepo("voicesense/voicesense-backend")
+	if !ok || owner != "voicesense" || name != "voicesense-backend" {
+		t.Fatalf("got %q/%q/%v, want voicesense/voicesense-backend/true", owner, name, ok)
+	}
+	if _, _, ok := splitOwnerRepo("voicesense"); ok {
+		t.Fatal("single-segment value should not parse")
+	}
+}
+
 func TestMonthAndDayBoundariesUseLocalTime(t *testing.T) {
 	loc := time.FixedZone("local", 2*60*60)
 	now := time.Date(2026, time.June, 9, 15, 30, 0, 0, loc)
