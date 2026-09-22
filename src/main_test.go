@@ -83,6 +83,23 @@ func TestCalendarConfigEnabledOnlyWhenRequiredFieldsPresent(t *testing.T) {
 	}
 }
 
+func TestForgejoConfigEnabledOnlyWhenRequiredFieldsPresent(t *testing.T) {
+	var c Config
+	if c.Forgejo.Enabled() {
+		t.Fatal("forgejo integration should be disabled when config is absent")
+	}
+
+	c.Forgejo.URL = "https://infra.example.com"
+	if c.Forgejo.Enabled() {
+		t.Fatal("forgejo integration should be disabled without an api key")
+	}
+
+	c.Forgejo.APIKey = "token"
+	if !c.Forgejo.Enabled() {
+		t.Fatal("forgejo integration should be enabled when url and api key are present")
+	}
+}
+
 func TestMonthAndDayBoundariesUseLocalTime(t *testing.T) {
 	loc := time.FixedZone("local", 2*60*60)
 	now := time.Date(2026, time.June, 9, 15, 30, 0, 0, loc)

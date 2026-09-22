@@ -39,6 +39,7 @@ type Config struct {
 	} `yaml:"git"`
 	Repositories []string                 `yaml:"repositories"`
 	Projects     map[string]ProjectConfig `yaml:"projects"`
+	Forgejo      ForgejoConfig            `yaml:"forgejo"`
 	Calendar     CalendarConfig           `yaml:"calendar"`
 }
 
@@ -48,6 +49,16 @@ type CalendarConfig struct {
 	EventNames        []string `yaml:"event_names"`
 	MonthlyHourBudget float64  `yaml:"monthly_hour_budget"`
 	ProjectIDs        []int    `yaml:"project_ids"`
+}
+
+type ForgejoConfig struct {
+	URL          string   `yaml:"url"`
+	APIKey       string   `yaml:"api_key"`
+	Repositories []string `yaml:"repositories"`
+}
+
+func (c ForgejoConfig) Enabled() bool {
+	return c.URL != "" && c.APIKey != ""
 }
 
 func (c CalendarConfig) Enabled() bool {
@@ -166,6 +177,9 @@ func loadConfig() error {
 	}
 	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
 		cfg.OpenAI.APIKey = key
+	}
+	if key := os.Getenv("FORGEJO_API_KEY"); key != "" {
+		cfg.Forgejo.APIKey = key
 	}
 	return nil
 }
