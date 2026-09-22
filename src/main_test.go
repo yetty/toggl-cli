@@ -110,6 +110,9 @@ func TestParseForgejoRemote(t *testing.T) {
 	}{
 		{name: "https with git suffix", raw: "https://infra.senseloom.com/voicesense/voicesense-backend.git", wantOwner: "voicesense", wantName: "voicesense-backend", wantOK: true},
 		{name: "https without suffix", raw: "https://infra.senseloom.com/voicesense/voicesense-web", wantOwner: "voicesense", wantName: "voicesense-web", wantOK: true},
+		{name: "https host with port", raw: "https://infra.senseloom.com:3000/voicesense/voicesense-backend.git", wantOwner: "voicesense", wantName: "voicesense-backend", wantOK: true},
+		{name: "case insensitive host", raw: "https://INFRA.SENSELOOM.COM/voicesense/voicesense-web.git", wantOwner: "voicesense", wantName: "voicesense-web", wantOK: true},
+		{name: "trailing slash", raw: "https://infra.senseloom.com/voicesense/senseloom-infra/", wantOwner: "voicesense", wantName: "senseloom-infra", wantOK: true},
 		{name: "ssh scp style", raw: "git@infra.senseloom.com:voicesense/senseloom-infra.git", wantOwner: "voicesense", wantName: "senseloom-infra", wantOK: true},
 		{name: "ssh url style", raw: "ssh://git@infra.senseloom.com/voicesense/redat-mock.git", wantOwner: "voicesense", wantName: "redat-mock", wantOK: true},
 		{name: "different host", raw: "git@github.com:yetty/toggl-cli.git", wantOK: false},
