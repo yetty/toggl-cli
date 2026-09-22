@@ -966,6 +966,88 @@ func TestMatchesForgejoAuthor(t *testing.T) {
 	}
 }
 
+func forgejoCommitItem(date string) map[string]any {
+	return map[string]any{
+		"sha": "x",
+		"commit": map[string]any{
+			"message":   "feat: work",
+			"author":    map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": date},
+			"committer": map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": date},
+		},
+		"author": map[string]any{"login": "juda"},
+	}
+}
+
+func TestFetchForgejoCommitsPagesUntilWindowExhausted(t *testing.T) {
+	oldCfg := cfg
+	defer func() { cfg = oldCfg }()
+	cfg = Config{}
+	cfg.Forgejo.APIKey = "token"
+	cfg.Git.User = `juda@example.com`
+
+	entry := TogglTimeEntry{
+		Start: time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC),
+		Stop:  time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC),
+	}
+
+	pageOne := make([]map[string]any, 0, forgejoPageSize)
+	for i := 0; i < forgejoPageSize; i++ {
+		pageOne = append(pageOne, forgejoCommitItem("2026-06-09T11:00:00Z"))
+	}
+	pageTwo := make([]map[string]any, 0, forgejoPageSize)
+	for i := 0; i < forgejoPageSize; i++ {
+		pageTwo = append(pageTwo, forgejoCommitItem("2026-06-08T09:00:00Z"))
+	}
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch r.URL.Query().Get("page") {
+		case "1":
+			json.NewEncoder(w).Encode(pageOne)
+		case "2":
+			json.NewEncoder(w).Encode(pageTwo)
+		default:
+			t.Errorf("unexpected page %s", r.URL.Query().Get("page"))
+			json.NewEncoder(w).Encode([]map[string]any{})
+		}
+	}))
+	defer server.Close()
+	cfg.Forgejo.URL = server.URL
+
+	commits, err := fetchForgejoCommits(entry, ForgejoRepo{Owner: "o", Name: "r"})
+	if err != nil {
+		t.Fatalf("fetchForgejoCommits returned error: %v", err)
+	}
+	if len(commits) != forgejoPageSize {
+		t.Fatalf("got %d commits, want %d", len(commits), forgejoPageSize)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2 (stop once oldest predates the window)", requests)
+	}
+}
+
+func TestForgejoRequestReturnsErrorOnFailureStatus(t *testing.T) {
+	oldCfg := cfg
+	defer func() { cfg = oldCfg }()
+	cfg = Config{}
+	cfg.Forgejo.APIKey = "token"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	cfg.Forgejo.URL = server.URL
+
+	_, err := forgejoRequest("repos/o/r/commits")
+	if err == nil {
+		t.Fatal("expected an error for a non-2xx response")
+	}
+	if !strings.Contains(err.Error(), "Forgejo API error") {
+		t.Fatalf("error = %q, want it to contain %q", err.Error(), "Forgejo API error")
+	}
+}
+
 func captureStdout(fn func() error) (string, error) {
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
