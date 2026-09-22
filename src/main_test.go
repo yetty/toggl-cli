@@ -1254,7 +1254,7 @@ func TestCollectForgejoActivityBuildsSplitAndPromptViews(t *testing.T) {
 	}
 }
 
-func TestCollectForgejoActivityDisabledMakesNoRequests(t *testing.T) {
+func TestCollectForgejoActivityDisabledReturnsEmpty(t *testing.T) {
 	oldCfg := cfg
 	defer func() { cfg = oldCfg }()
 	cfg = Config{}
@@ -1262,6 +1262,123 @@ func TestCollectForgejoActivityDisabledMakesNoRequests(t *testing.T) {
 	activity := collectForgejoActivity(TogglTimeEntry{})
 	if len(activity.SplitCommits) != 0 || len(activity.PromptSections) != 0 {
 		t.Fatalf("disabled integration should return empty activity: %+v", activity)
+	}
+}
+
+func TestCollectForgejoActivityKeepsCommitsWhenIssueSearchFails(t *testing.T) {
+	oldCfg, oldRemote := cfg, gitRemoteURL
+	defer func() { cfg, gitRemoteURL = oldCfg, oldRemote }()
+
+	entry := TogglTimeEntry{
+		Start: time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC),
+		Stop:  time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC),
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/repos/voicesense/voicesense-backend/commits":
+			json.NewEncoder(w).Encode([]map[string]any{{
+				"sha": "a",
+				"commit": map[string]any{
+					"message":   "feat: quota checks",
+					"author":    map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-09T10:30:00Z"},
+					"committer": map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-09T10:30:00Z"},
+				},
+				"author": map[string]any{"login": "juda"},
+			}})
+		case "/api/v1/repos/issues/search":
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg = Config{}
+	cfg.Git.User = `juda@example.com`
+	cfg.Forgejo.URL = server.URL
+	cfg.Forgejo.APIKey = "token"
+	cfg.Projects = map[string]ProjectConfig{
+		"voicesense": {ProjectID: 204198137, Repositories: []string{"/repos/voicesense-backend"}},
+	}
+	gitRemoteURL = func(repo string) (string, error) {
+		return "https://127.0.0.1/voicesense/voicesense-backend.git", nil
+	}
+
+	activity := collectForgejoActivity(entry)
+	if len(activity.SplitCommits) != 1 {
+		t.Fatalf("SplitCommits = %d, want 1 preserved commit: %+v", len(activity.SplitCommits), activity.SplitCommits)
+	}
+	if joined := strings.Join(activity.PromptSections, "\n"); !strings.Contains(joined, "feat: quota checks") {
+		t.Fatalf("commit activity not preserved after issue failure: %q", joined)
+	}
+}
+
+func TestCollectForgejoActivityKeepsUnmappedRepoInPromptOnly(t *testing.T) {
+	oldCfg, oldRemote := cfg, gitRemoteURL
+	defer func() { cfg, gitRemoteURL = oldCfg, oldRemote }()
+
+	entry := TogglTimeEntry{
+		Start: time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC),
+		Stop:  time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC),
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/repos/voicesense/voicesense-web/commits":
+			json.NewEncoder(w).Encode([]map[string]any{{
+				"sha": "b",
+				"commit": map[string]any{
+					"message":   "feat: remote only",
+					"author":    map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-09T10:45:00Z"},
+					"committer": map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-09T10:45:00Z"},
+				},
+				"author": map[string]any{"login": "juda"},
+			}})
+		case "/api/v1/repos/issues/search":
+			json.NewEncoder(w).Encode([]map[string]any{})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg = Config{}
+	cfg.Git.User = `juda@example.com`
+	cfg.Forgejo.URL = server.URL
+	cfg.Forgejo.APIKey = "token"
+	cfg.Forgejo.Repositories = []string{"voicesense/voicesense-web"}
+
+	activity := collectForgejoActivity(entry)
+	if len(activity.SplitCommits) != 0 {
+		t.Fatalf("unmapped repository must not produce splits: %+v", activity.SplitCommits)
+	}
+	if joined := strings.Join(activity.PromptSections, "\n"); !strings.Contains(joined, "feat: remote only") {
+		t.Fatalf("unmapped repository should contribute prompt text: %q", joined)
+	}
+}
+
+func TestCollectForgejoActivityMakesNoRequestsWithoutResolvedRepositories(t *testing.T) {
+	oldCfg := cfg
+	defer func() { cfg = oldCfg }()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	cfg = Config{}
+	cfg.Forgejo.URL = server.URL
+	cfg.Forgejo.APIKey = "token"
+
+	activity := collectForgejoActivity(TogglTimeEntry{})
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+	if len(activity.SplitCommits) != 0 || len(activity.PromptSections) != 0 {
+		t.Fatalf("expected empty activity: %+v", activity)
 	}
 }
 
