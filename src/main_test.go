@@ -124,6 +124,21 @@ func TestFetchForgejoIssuesFiltersToResolvedRepositories(t *testing.T) {
 		if r.URL.Query().Get("mentioned") != "" {
 			t.Fatal("mentioned should not be requested")
 		}
+		if r.URL.Query().Get("state") != "all" {
+			t.Fatalf("state = %q, want all", r.URL.Query().Get("state"))
+		}
+		if r.URL.Query().Get("since") != "2026-06-09T10:00:00Z" {
+			t.Fatalf("since = %q", r.URL.Query().Get("since"))
+		}
+		if r.URL.Query().Get("before") != "2026-06-09T12:00:00Z" {
+			t.Fatalf("before = %q", r.URL.Query().Get("before"))
+		}
+		if r.URL.Query().Get("limit") != "50" {
+			t.Fatalf("limit = %q, want 50", r.URL.Query().Get("limit"))
+		}
+		if r.URL.Query().Get("page") != "1" {
+			t.Fatalf("page = %q, want 1", r.URL.Query().Get("page"))
+		}
 		json.NewEncoder(w).Encode([]map[string]any{
 			{
 				"number":       12,
@@ -136,7 +151,7 @@ func TestFetchForgejoIssuesFiltersToResolvedRepositories(t *testing.T) {
 				"number":     45,
 				"title":      "Retry backoff",
 				"updated_at": "2026-06-09T11:30:00Z",
-				"repository": map[string]any{"full_name": "voicesense/voicesense-web"},
+				"repository": map[string]any{"full_name": "Voicesense/Voicesense-Web"},
 			},
 			{
 				"number":     99,
@@ -162,6 +177,80 @@ func TestFetchForgejoIssuesFiltersToResolvedRepositories(t *testing.T) {
 	}
 	if issues[0].Number != 12 || issues[1].Number != 45 {
 		t.Fatalf("unexpected issue numbers: %+v", issues)
+	}
+	if issues[0].Title != "Persist quota decisions" {
+		t.Fatalf("title = %q", issues[0].Title)
+	}
+	if !issues[0].UpdatedAt.Equal(time.Date(2026, 6, 9, 11, 0, 0, 0, time.UTC)) {
+		t.Fatalf("updated_at = %s", issues[0].UpdatedAt)
+	}
+}
+
+func forgejoIssueItem(number int, fullName string) map[string]any {
+	return map[string]any{
+		"number":     number,
+		"title":      "Tracked issue",
+		"updated_at": "2026-06-09T11:00:00Z",
+		"repository": map[string]any{"full_name": fullName},
+	}
+}
+
+func TestFetchForgejoIssuesPagesThroughAllResults(t *testing.T) {
+	oldCfg := cfg
+	defer func() { cfg = oldCfg }()
+	cfg = Config{}
+	cfg.Forgejo.APIKey = "token"
+
+	entry := TogglTimeEntry{
+		Start: time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC),
+		Stop:  time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC),
+	}
+
+	fullPage := func(start int) []map[string]any {
+		items := make([]map[string]any, 0, forgejoPageSize)
+		for i := 0; i < forgejoPageSize; i++ {
+			items = append(items, forgejoIssueItem(start+i, "voicesense/voicesense-backend"))
+		}
+		return items
+	}
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch r.URL.Query().Get("page") {
+		case "1":
+			json.NewEncoder(w).Encode(fullPage(1))
+		case "2":
+			json.NewEncoder(w).Encode(fullPage(51))
+		case "3":
+			json.NewEncoder(w).Encode([]map[string]any{forgejoIssueItem(101, "voicesense/voicesense-backend")})
+		default:
+			t.Errorf("unexpected page %s", r.URL.Query().Get("page"))
+			json.NewEncoder(w).Encode([]map[string]any{})
+		}
+	}))
+	defer server.Close()
+	cfg.Forgejo.URL = server.URL
+
+	issues, err := fetchForgejoIssues(entry, []ForgejoRepo{{Owner: "voicesense", Name: "voicesense-backend"}})
+	if err != nil {
+		t.Fatalf("fetchForgejoIssues returned error: %v", err)
+	}
+	if len(issues) != 2*forgejoPageSize+1 {
+		t.Fatalf("got %d issues, want %d", len(issues), 2*forgejoPageSize+1)
+	}
+	if requests != 3 {
+		t.Fatalf("requests = %d, want 3", requests)
+	}
+}
+
+func TestFetchForgejoIssuesSkipsEmptyRepositoryAllowlist(t *testing.T) {
+	issues, err := fetchForgejoIssues(TogglTimeEntry{}, nil)
+	if err != nil {
+		t.Fatalf("fetchForgejoIssues returned error: %v", err)
+	}
+	if issues != nil {
+		t.Fatalf("issues = %+v, want nil", issues)
 	}
 }
 

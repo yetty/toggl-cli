@@ -580,6 +580,10 @@ type forgejoIssue struct {
 }
 
 func fetchForgejoIssues(entry TogglTimeEntry, repos []ForgejoRepo) ([]forgejoIssue, error) {
+	if len(repos) == 0 {
+		return nil, nil
+	}
+
 	allowed := map[string]bool{}
 	for _, repo := range repos {
 		allowed[strings.ToLower(repo.FullName())] = true
