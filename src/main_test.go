@@ -849,6 +849,33 @@ func TestResolveForgejoRepositoriesMergesSourcesAndMappings(t *testing.T) {
 	}
 }
 
+func TestResolveForgejoRepositoriesUpgradesMappingForExplicitEntry(t *testing.T) {
+	oldCfg, oldRemote := cfg, gitRemoteURL
+	defer func() { cfg, gitRemoteURL = oldCfg, oldRemote }()
+
+	cfg = Config{}
+	cfg.Forgejo.URL = "https://infra.senseloom.com"
+	cfg.Forgejo.APIKey = "token"
+	cfg.Forgejo.Repositories = []string{"voicesense/voicesense-backend"}
+	cfg.Projects = map[string]ProjectConfig{
+		"voicesense": {
+			ProjectID:    204198137,
+			Repositories: []string{"/repos/voicesense-backend"},
+		},
+	}
+	gitRemoteURL = func(repo string) (string, error) {
+		return "https://infra.senseloom.com/voicesense/voicesense-backend.git", nil
+	}
+
+	repos := resolveForgejoRepositories()
+	if len(repos) != 1 {
+		t.Fatalf("resolved %d repositories, want 1: %+v", len(repos), repos)
+	}
+	if repos[0].ProjectName != "voicesense" || repos[0].ProjectID != 204198137 {
+		t.Fatalf("mapping = %q/%d, want voicesense/204198137", repos[0].ProjectName, repos[0].ProjectID)
+	}
+}
+
 func captureStdout(fn func() error) (string, error) {
 	oldStdout := os.Stdout
 	r, w, err := os.Pipe()
