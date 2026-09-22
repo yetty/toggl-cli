@@ -154,15 +154,25 @@ func TestFetchForgejoIssuesFiltersToResolvedRepositories(t *testing.T) {
 		Stop:  time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC),
 	}
 
+	relationships := []string{"created", "assigned", "review_requested", "reviewed"}
+	seenRelationships := map[string]bool{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/repos/issues/search" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
-		for _, param := range []string{"created", "assigned", "review_requested", "reviewed"} {
-			if r.URL.Query().Get(param) != "true" {
-				t.Fatalf("query param %q = %q, want true", param, r.URL.Query().Get(param))
+		active := ""
+		for _, param := range relationships {
+			if r.URL.Query().Get(param) == "true" {
+				if active != "" {
+					t.Fatalf("request combined relationship filters: %v", r.URL.Query())
+				}
+				active = param
 			}
 		}
+		if active == "" {
+			t.Fatalf("request missing a relationship filter: %v", r.URL.Query())
+		}
+		seenRelationships[active] = true
 		if r.URL.Query().Get("mentioned") != "" {
 			t.Fatal("mentioned should not be requested")
 		}
@@ -180,6 +190,10 @@ func TestFetchForgejoIssuesFiltersToResolvedRepositories(t *testing.T) {
 		}
 		if r.URL.Query().Get("page") != "1" {
 			t.Fatalf("page = %q, want 1", r.URL.Query().Get("page"))
+		}
+		if active != "created" {
+			json.NewEncoder(w).Encode([]map[string]any{})
+			return
 		}
 		json.NewEncoder(w).Encode([]map[string]any{
 			{
@@ -213,6 +227,11 @@ func TestFetchForgejoIssuesFiltersToResolvedRepositories(t *testing.T) {
 	issues, err := fetchForgejoIssues(entry, repos)
 	if err != nil {
 		t.Fatalf("fetchForgejoIssues returned error: %v", err)
+	}
+	for _, relationship := range relationships {
+		if !seenRelationships[relationship] {
+			t.Fatalf("relationship %q was never queried", relationship)
+		}
 	}
 	if len(issues) != 2 {
 		t.Fatalf("got %d issues, want 2: %+v", len(issues), issues)
@@ -256,9 +275,13 @@ func TestFetchForgejoIssuesPagesThroughAllResults(t *testing.T) {
 		return items
 	}
 
-	requests := 0
+	createdRequests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
+		if r.URL.Query().Get("created") != "true" {
+			json.NewEncoder(w).Encode([]map[string]any{})
+			return
+		}
+		createdRequests++
 		switch r.URL.Query().Get("page") {
 		case "1":
 			json.NewEncoder(w).Encode(fullPage(1))
@@ -281,8 +304,38 @@ func TestFetchForgejoIssuesPagesThroughAllResults(t *testing.T) {
 	if len(issues) != 2*forgejoPageSize+1 {
 		t.Fatalf("got %d issues, want %d", len(issues), 2*forgejoPageSize+1)
 	}
-	if requests != 3 {
-		t.Fatalf("requests = %d, want 3", requests)
+	if createdRequests != 3 {
+		t.Fatalf("created requests = %d, want 3", createdRequests)
+	}
+}
+
+func TestFetchForgejoIssuesDeduplicatesAcrossRelationships(t *testing.T) {
+	oldCfg := cfg
+	defer func() { cfg = oldCfg }()
+	cfg = Config{}
+	cfg.Forgejo.APIKey = "token"
+
+	entry := TogglTimeEntry{
+		Start: time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC),
+		Stop:  time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC),
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("created") == "true" || r.URL.Query().Get("assigned") == "true" {
+			json.NewEncoder(w).Encode([]map[string]any{forgejoIssueItem(7, "voicesense/voicesense-backend")})
+			return
+		}
+		json.NewEncoder(w).Encode([]map[string]any{})
+	}))
+	defer server.Close()
+	cfg.Forgejo.URL = server.URL
+
+	issues, err := fetchForgejoIssues(entry, []ForgejoRepo{{Owner: "voicesense", Name: "voicesense-backend"}})
+	if err != nil {
+		t.Fatalf("fetchForgejoIssues returned error: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("got %d issues, want 1 after dedupe across relationships: %+v", len(issues), issues)
 	}
 }
 

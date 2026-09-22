@@ -56,7 +56,7 @@ Identity matching uses the `git.user` tokens only; no additional identity lookup
 
 **Pull requests and issues.** One cross-repository search per run:
 
-- `GET /repos/issues/search?state=all&since=<start>&before=<stop>&created=true&assigned=true&review_requested=true&reviewed=true&limit=50&page=N`. `mentioned` is deliberately omitted to avoid mention-only noise.
+- Forgejo ANDs the relationship filters, so requesting several at once matches only items satisfying all of them (verified against the live server: all four together return zero). The CLI therefore issues one `GET /repos/issues/search` per relationship (`created`, `assigned`, `review_requested`, `reviewed`) with `state=all`, `since`, `before`, `limit`, `page`, then merges the results and de-duplicates by repository and number. `mentioned` is deliberately omitted to avoid mention-only noise.
 - Page until exhausted; filter results client-side to the resolved repository set so the allowlist is honored.
 - Split results into pull requests (non-null `pull_request`) and issues.
 - `since` / `before` filtering is on updated time, so an item merely touched in the window counts as activity. This is accepted.

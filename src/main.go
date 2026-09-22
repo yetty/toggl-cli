@@ -589,16 +589,41 @@ func fetchForgejoIssues(entry TogglTimeEntry, repos []ForgejoRepo) ([]forgejoIss
 		allowed[strings.ToLower(repo.FullName())] = true
 	}
 
+	// Forgejo ANDs the relationship filters, so requesting several at once
+	// matches only items that satisfy all of them. Query each relationship
+	// separately and merge the results.
+	relationships := []string{"created", "assigned", "review_requested", "reviewed"}
+
+	seen := map[string]bool{}
+	var result []forgejoIssue
+	for _, relationship := range relationships {
+		items, err := searchForgejoIssues(entry, relationship)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			if !allowed[strings.ToLower(item.Repository.FullName)] {
+				continue
+			}
+			key := strings.ToLower(item.Repository.FullName) + "#" + strconv.Itoa(item.Number)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			result = append(result, item)
+		}
+	}
+	return result, nil
+}
+
+func searchForgejoIssues(entry TogglTimeEntry, relationship string) ([]forgejoIssue, error) {
 	var result []forgejoIssue
 	for page := 1; page <= forgejoMaxPages; page++ {
 		params := url.Values{}
 		params.Set("state", "all")
 		params.Set("since", entry.Start.Format(time.RFC3339))
 		params.Set("before", entry.Stop.Format(time.RFC3339))
-		params.Set("created", "true")
-		params.Set("assigned", "true")
-		params.Set("review_requested", "true")
-		params.Set("reviewed", "true")
+		params.Set(relationship, "true")
 		params.Set("limit", strconv.Itoa(forgejoPageSize))
 		params.Set("page", strconv.Itoa(page))
 
@@ -613,11 +638,7 @@ func fetchForgejoIssues(entry TogglTimeEntry, repos []ForgejoRepo) ([]forgejoIss
 		if len(items) == 0 {
 			break
 		}
-		for _, item := range items {
-			if allowed[strings.ToLower(item.Repository.FullName)] {
-				result = append(result, item)
-			}
-		}
+		result = append(result, items...)
 		if len(items) < forgejoPageSize {
 			break
 		}

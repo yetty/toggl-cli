@@ -13,8 +13,10 @@ matching commits.
   plus an optional explicit `forgejo.repositories` list for repositories without a clone.
 - Filter commits client-side by committer date and `git.user` author tokens, because the
   Forgejo commits endpoint exposes no date or author filter in the target server version.
-- Use `GET /repos/issues/search` with `created`, `assigned`, `review_requested`, and
-  `reviewed`; `since`/`before` filter by updated time, which is accepted.
+- Query `GET /repos/issues/search` once per relationship (`created`, `assigned`,
+  `review_requested`, `reviewed`) and merge the results, because Forgejo ANDs multiple
+  relationship filters and would otherwise match nothing. `since`/`before` filter by
+  updated time, which is accepted.
 - Keep two disjoint activity views: project-mapped activity feeds time splitting, while
   formatted sections feed non-split prompts. Within a single prompt path an item appears
   once; the non-split prompt may still repeat an identical local and Forgejo commit line.
