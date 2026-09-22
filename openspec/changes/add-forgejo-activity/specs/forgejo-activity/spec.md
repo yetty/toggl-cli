@@ -1,9 +1,5 @@
-# forgejo-activity Specification
+## ADDED Requirements
 
-## Purpose
-Collect the authenticated user's commits, pull requests, and issues from a configured Forgejo server for a Toggl session window and make them available to summary generation and project time splitting.
-
-## Requirements
 ### Requirement: Optional Forgejo configuration
 The CLI SHALL integrate with Forgejo only when `forgejo.url` and `forgejo.api_key` are both configured.
 
