@@ -1157,6 +1157,138 @@ func TestFillEmptyDescriptionsConfirmsUpdatesAndReportsCounts(t *testing.T) {
 	}
 }
 
+func TestFillEmptyDescriptionsIncludesForgejoActivity(t *testing.T) {
+	oldCfg, oldTogglBase, oldOpenAIBase := cfg, togglBaseURL, openAIBaseURL
+	defer func() { cfg, togglBaseURL, openAIBaseURL = oldCfg, oldTogglBase, oldOpenAIBase }()
+
+	start := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	cfg = Config{}
+	cfg.Toggl.WorkspaceID = 123
+	cfg.OpenAI.Model = "test"
+	cfg.Git.User = `juda@example.com`
+	cfg.Forgejo.APIKey = "token"
+	cfg.Forgejo.Repositories = []string{"voicesense/voicesense-backend"}
+
+	var capturedPrompt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/me/time_entries":
+			json.NewEncoder(w).Encode([]TogglTimeEntry{{ID: 1, Workspace: 123, Project: 10, Start: start, Stop: start.Add(time.Hour)}})
+		case r.Method == "PUT" && r.URL.Path == "/api/workspaces/123/time_entries/1":
+			w.WriteHeader(http.StatusOK)
+		case r.Method == "POST" && r.URL.Path == "/openai":
+			var request struct {
+				Messages []struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			json.NewDecoder(r.Body).Decode(&request)
+			for _, message := range request.Messages {
+				if message.Role == "user" {
+					capturedPrompt = message.Content
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": "Remote work summary"}}}})
+		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/voicesense/voicesense-backend/commits":
+			json.NewEncoder(w).Encode([]map[string]any{{
+				"sha": "a",
+				"commit": map[string]any{
+					"message":   "feat: forgejo fill work",
+					"author":    map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-01T09:30:00Z"},
+					"committer": map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-01T09:30:00Z"},
+				},
+				"author": map[string]any{"login": "juda"},
+			}})
+		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/issues/search":
+			json.NewEncoder(w).Encode([]map[string]any{})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+	togglBaseURL = server.URL + "/api/"
+	openAIBaseURL = server.URL + "/openai"
+	cfg.Forgejo.URL = server.URL
+
+	cmd := fillEmptyDescriptionsCmd()
+	cmd.SetArgs([]string{"--start", "2026-06-01T00:00:00Z", "--end", "2026-06-08T00:00:00Z"})
+	if _, err := captureStdoutWithStdin("y\n", func() error { return cmd.Execute() }); err != nil {
+		t.Fatalf("fill-empty-descriptions returned error: %v", err)
+	}
+	if !strings.Contains(capturedPrompt, "Forgejo commits:") {
+		t.Fatalf("fill-empty prompt missing Forgejo activity: %q", capturedPrompt)
+	}
+}
+
+func TestRepairSummariesIncludesForgejoActivity(t *testing.T) {
+	oldCfg, oldTogglBase, oldOpenAIBase := cfg, togglBaseURL, openAIBaseURL
+	defer func() { cfg, togglBaseURL, openAIBaseURL = oldCfg, oldTogglBase, oldOpenAIBase }()
+
+	start := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	cfg = Config{}
+	cfg.Toggl.WorkspaceID = 123
+	cfg.OpenAI.Model = "test"
+	cfg.Git.User = `juda@example.com`
+	cfg.Forgejo.APIKey = "token"
+	cfg.Forgejo.Repositories = []string{"voicesense/voicesense-backend"}
+
+	var capturedPrompt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/me/time_entries":
+			json.NewEncoder(w).Encode([]TogglTimeEntry{{ID: 1, Workspace: 123, Project: 10, Start: start, Stop: start.Add(time.Hour), Description: badSummaryText}})
+		case r.Method == "PUT" && r.URL.Path == "/api/workspaces/123/time_entries/1":
+			w.WriteHeader(http.StatusOK)
+		case r.Method == "POST" && r.URL.Path == "/openai":
+			var request struct {
+				Messages []struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			json.NewDecoder(r.Body).Decode(&request)
+			for _, message := range request.Messages {
+				if message.Role == "user" {
+					capturedPrompt = message.Content
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": "Repaired summary"}}}})
+		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/voicesense/voicesense-backend/commits":
+			json.NewEncoder(w).Encode([]map[string]any{{
+				"sha": "a",
+				"commit": map[string]any{
+					"message":   "feat: forgejo repair work",
+					"author":    map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-01T09:30:00Z"},
+					"committer": map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-01T09:30:00Z"},
+				},
+				"author": map[string]any{"login": "juda"},
+			}})
+		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/issues/search":
+			json.NewEncoder(w).Encode([]map[string]any{})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+	togglBaseURL = server.URL + "/api/"
+	openAIBaseURL = server.URL + "/openai"
+	cfg.Forgejo.URL = server.URL
+
+	cmd := repairSummariesCmd()
+	cmd.SetArgs([]string{"--start", "2026-06-01T00:00:00Z", "--end", "2026-06-08T00:00:00Z"})
+	output, err := captureStdout(func() error { return cmd.Execute() })
+	if err != nil {
+		t.Fatalf("repair-summaries returned error: %v", err)
+	}
+	if !strings.Contains(capturedPrompt, "Forgejo commits:") {
+		t.Fatalf("repair prompt missing Forgejo activity: %q", capturedPrompt)
+	}
+	if !strings.Contains(output, "Repaired 1 entries.") {
+		t.Fatalf("output missing repair count: %q", output)
+	}
+}
+
 func TestResolveForgejoRepositoriesMergesSourcesAndMappings(t *testing.T) {
 	oldCfg, oldRemote := cfg, gitRemoteURL
 	defer func() { cfg, gitRemoteURL = oldCfg, oldRemote }()

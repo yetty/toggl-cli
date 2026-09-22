@@ -649,10 +649,11 @@ func collectForgejoActivity(entry TogglTimeEntry) ForgejoActivity {
 
 	var activity ForgejoActivity
 	var commitLines []string
+	var commitFailures []string
 	for _, repo := range repos {
 		commits, err := fetchForgejoCommits(entry, repo)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: skipping Forgejo repository %s (%v)\n", repo.FullName(), err)
+			commitFailures = append(commitFailures, fmt.Sprintf("%s (%v)", repo.FullName(), err))
 			continue
 		}
 		for _, commit := range commits {
@@ -661,6 +662,9 @@ func collectForgejoActivity(entry TogglTimeEntry) ForgejoActivity {
 				activity.SplitCommits = append(activity.SplitCommits, commit)
 			}
 		}
+	}
+	if len(commitFailures) > 0 {
+		fmt.Fprintf(os.Stderr, "Warning: skipping Forgejo commits for %s\n", strings.Join(commitFailures, ", "))
 	}
 	if len(commitLines) > 0 {
 		activity.PromptSections = append(activity.PromptSections, "Forgejo commits:\n"+strings.Join(commitLines, "\n\n"))
