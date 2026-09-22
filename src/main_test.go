@@ -100,6 +100,71 @@ func TestForgejoConfigEnabledOnlyWhenRequiredFieldsPresent(t *testing.T) {
 	}
 }
 
+func TestFetchForgejoIssuesFiltersToResolvedRepositories(t *testing.T) {
+	oldCfg := cfg
+	defer func() { cfg = oldCfg }()
+
+	cfg = Config{}
+	cfg.Forgejo.APIKey = "token"
+
+	entry := TogglTimeEntry{
+		Start: time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC),
+		Stop:  time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC),
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/repos/issues/search" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		for _, param := range []string{"created", "assigned", "review_requested", "reviewed"} {
+			if r.URL.Query().Get(param) != "true" {
+				t.Fatalf("query param %q = %q, want true", param, r.URL.Query().Get(param))
+			}
+		}
+		if r.URL.Query().Get("mentioned") != "" {
+			t.Fatal("mentioned should not be requested")
+		}
+		json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"number":       12,
+				"title":        "Persist quota decisions",
+				"updated_at":   "2026-06-09T11:00:00Z",
+				"pull_request": map[string]any{"merged": false},
+				"repository":   map[string]any{"full_name": "voicesense/voicesense-backend"},
+			},
+			{
+				"number":     45,
+				"title":      "Retry backoff",
+				"updated_at": "2026-06-09T11:30:00Z",
+				"repository": map[string]any{"full_name": "voicesense/voicesense-web"},
+			},
+			{
+				"number":     99,
+				"title":      "Unrelated repo work",
+				"updated_at": "2026-06-09T11:45:00Z",
+				"repository": map[string]any{"full_name": "other/other-repo"},
+			},
+		})
+	}))
+	defer server.Close()
+	cfg.Forgejo.URL = server.URL
+
+	repos := []ForgejoRepo{
+		{Owner: "voicesense", Name: "voicesense-backend"},
+		{Owner: "voicesense", Name: "voicesense-web"},
+	}
+	issues, err := fetchForgejoIssues(entry, repos)
+	if err != nil {
+		t.Fatalf("fetchForgejoIssues returned error: %v", err)
+	}
+	if len(issues) != 2 {
+		t.Fatalf("got %d issues, want 2: %+v", len(issues), issues)
+	}
+	if issues[0].Number != 12 || issues[1].Number != 45 {
+		t.Fatalf("unexpected issue numbers: %+v", issues)
+	}
+}
+
 func TestParseForgejoRemote(t *testing.T) {
 	cases := []struct {
 		name      string

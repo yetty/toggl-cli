@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -566,6 +567,61 @@ func fetchForgejoCommits(entry TogglTimeEntry, repo ForgejoRepo) ([]ProjectCommi
 		}
 	}
 	return commits, nil
+}
+
+type forgejoIssue struct {
+	Number      int       `json:"number"`
+	Title       string    `json:"title"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	PullRequest *struct{} `json:"pull_request"`
+	Repository  struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+func fetchForgejoIssues(entry TogglTimeEntry, repos []ForgejoRepo) ([]forgejoIssue, error) {
+	allowed := map[string]bool{}
+	for _, repo := range repos {
+		allowed[strings.ToLower(repo.FullName())] = true
+	}
+
+	var result []forgejoIssue
+	for page := 1; page <= forgejoMaxPages; page++ {
+		params := url.Values{}
+		params.Set("state", "all")
+		params.Set("since", entry.Start.Format(time.RFC3339))
+		params.Set("before", entry.Stop.Format(time.RFC3339))
+		params.Set("created", "true")
+		params.Set("assigned", "true")
+		params.Set("review_requested", "true")
+		params.Set("reviewed", "true")
+		params.Set("limit", strconv.Itoa(forgejoPageSize))
+		params.Set("page", strconv.Itoa(page))
+
+		data, err := forgejoRequest("repos/issues/search?" + params.Encode())
+		if err != nil {
+			return nil, err
+		}
+		var items []forgejoIssue
+		if err := json.Unmarshal(data, &items); err != nil {
+			return nil, err
+		}
+		if len(items) == 0 {
+			break
+		}
+		for _, item := range items {
+			if allowed[strings.ToLower(item.Repository.FullName)] {
+				result = append(result, item)
+			}
+		}
+		if len(items) < forgejoPageSize {
+			break
+		}
+		if page == forgejoMaxPages {
+			fmt.Fprintf(os.Stderr, "Warning: Forgejo issue search truncated at %d pages\n", forgejoMaxPages)
+		}
+	}
+	return result, nil
 }
 
 func currentMonthBounds(now time.Time) (time.Time, time.Time) {
