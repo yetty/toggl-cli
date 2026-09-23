@@ -703,9 +703,14 @@ func collectForgejoActivity(entry TogglTimeEntry) ForgejoActivity {
 	if !cfg.Forgejo.Enabled() {
 		return ForgejoActivity{}
 	}
-	repos := resolveForgejoRepositories()
+	return collectForgejoActivityForRepos(entry, resolveForgejoRepositories())
+}
+
+// collectForgejoActivityForRepos collects activity for an already-resolved
+// repository set, so callers that process many entries resolve repositories
+// (and their git remotes) only once.
+func collectForgejoActivityForRepos(entry TogglTimeEntry, repos []ForgejoRepo) ForgejoActivity {
 	if len(repos) == 0 {
-		logf("forgejo: no repositories resolved")
 		return ForgejoActivity{}
 	}
 	logf("forgejo: resolved %d repositories", len(repos))
@@ -1508,6 +1513,11 @@ func fillEmptyDescriptionsCmd() *cobra.Command {
 			updated := 0
 			skipped := 0
 
+			var forgejoRepos []ForgejoRepo
+			if cfg.Forgejo.Enabled() {
+				forgejoRepos = resolveForgejoRepositories()
+			}
+
 			for _, entry := range entries {
 				if strings.TrimSpace(entry.Description) != "" {
 					continue
@@ -1519,7 +1529,7 @@ func fillEmptyDescriptionsCmd() *cobra.Command {
 				}
 
 				commits := collectCommits(entry)
-				activity := collectForgejoActivity(entry)
+				activity := collectForgejoActivityForRepos(entry, forgejoRepos)
 				promptText := buildPromptTextWithSections(commits, activity.PromptSections, "")
 				description := getDescriptionFromReader(promptText, reader)
 				if description == "" {
@@ -1570,18 +1580,17 @@ func whoamiCmd() *cobra.Command {
 				return err
 			}
 
-			var resp struct {
-				Data struct {
-					ID       int    `json:"id"`
-					Email    string `json:"email"`
-					Fullname string `json:"fullname"`
-				} `json:"data"`
+			// API v9 GET /me returns the user object directly (no data envelope).
+			var user struct {
+				ID       int    `json:"id"`
+				Email    string `json:"email"`
+				Fullname string `json:"fullname"`
 			}
-			if err := json.Unmarshal(data, &resp); err != nil {
+			if err := json.Unmarshal(data, &user); err != nil {
 				return err
 			}
 
-			fmt.Printf("User ID: %d\nFull Name: %s\nEmail: %s\n", resp.Data.ID, resp.Data.Fullname, resp.Data.Email)
+			fmt.Printf("User ID: %d\nFull Name: %s\nEmail: %s\n", user.ID, user.Fullname, user.Email)
 			return nil
 		},
 	}
@@ -1787,6 +1796,11 @@ func repairSummariesCmd() *cobra.Command {
 			}
 
 			repaired := 0
+			var forgejoRepos []ForgejoRepo
+			if cfg.Forgejo.Enabled() {
+				forgejoRepos = resolveForgejoRepositories()
+			}
+
 			for _, entry := range entries {
 				if !isBadSummary(entry.Description) {
 					continue
@@ -1794,7 +1808,7 @@ func repairSummariesCmd() *cobra.Command {
 
 				fmt.Printf("Repairing entry %d (%s - %s)\n", entry.ID, entry.Start.Format(time.RFC3339), entry.Stop.Format(time.RFC3339))
 				commits := collectCommits(entry)
-				activity := collectForgejoActivity(entry)
+				activity := collectForgejoActivityForRepos(entry, forgejoRepos)
 				promptText := buildPromptTextWithSections(commits, activity.PromptSections, "")
 				description := getDescription(promptText)
 				if description == "" {

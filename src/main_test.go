@@ -1915,3 +1915,92 @@ func TestLogfIsSilentWhenDisabled(t *testing.T) {
 
 	logf("must not panic or write anywhere")
 }
+
+func TestWhoamiCmdPrintsDirectUserObject(t *testing.T) {
+	oldCfg, oldBase := cfg, togglBaseURL
+	defer func() { cfg, togglBaseURL = oldCfg, oldBase }()
+	cfg = Config{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/me" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"id": 10765898, "email": "juda@example.com", "fullname": "Juda Kaleta"})
+	}))
+	defer server.Close()
+	togglBaseURL = server.URL + "/api/"
+
+	output, err := captureStdout(func() error { return whoamiCmd().RunE(whoamiCmd(), nil) })
+	if err != nil {
+		t.Fatalf("whoami returned error: %v", err)
+	}
+	for _, want := range []string{"User ID: 10765898", "Full Name: Juda Kaleta", "Email: juda@example.com"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q: %q", want, output)
+		}
+	}
+}
+
+func TestFillEmptyDescriptionsResolvesForgejoRepositoriesOnce(t *testing.T) {
+	oldCfg, oldTogglBase, oldOpenAIBase, oldRemote := cfg, togglBaseURL, openAIBaseURL, gitRemoteURL
+	defer func() {
+		cfg, togglBaseURL, openAIBaseURL, gitRemoteURL = oldCfg, oldTogglBase, oldOpenAIBase, oldRemote
+	}()
+
+	start := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	cfg = Config{}
+	cfg.Toggl.WorkspaceID = 123
+	cfg.OpenAI.Model = "test"
+	cfg.Git.User = `juda@example.com`
+	cfg.Forgejo.APIKey = "token"
+	cfg.Projects = map[string]ProjectConfig{
+		"voicesense": {ProjectID: 204198137, Repositories: []string{"/repos/voicesense-backend"}},
+	}
+
+	remoteCalls := 0
+	gitRemoteURL = func(repo string) (string, error) {
+		remoteCalls++
+		return "https://127.0.0.1/voicesense/voicesense-backend.git", nil
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/me/time_entries":
+			json.NewEncoder(w).Encode([]TogglTimeEntry{
+				{ID: 1, Workspace: 123, Project: 10, Start: start, Stop: start.Add(time.Hour)},
+				{ID: 2, Workspace: 123, Project: 10, Start: start.Add(2 * time.Hour), Stop: start.Add(3 * time.Hour)},
+			})
+		case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/workspaces/123/time_entries/"):
+			w.WriteHeader(http.StatusOK)
+		case r.Method == "POST" && r.URL.Path == "/openai":
+			json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": "Remote work"}}}})
+		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/voicesense/voicesense-backend/commits":
+			json.NewEncoder(w).Encode([]map[string]any{{
+				"sha": "a",
+				"commit": map[string]any{
+					"message":   "feat: work",
+					"author":    map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-01T09:30:00Z"},
+					"committer": map[string]any{"name": "Juda Kaleta", "email": "juda@example.com", "date": "2026-06-01T09:30:00Z"},
+				},
+				"author": map[string]any{"login": "juda"},
+			}})
+		case r.Method == "GET" && r.URL.Path == "/api/v1/repos/issues/search":
+			json.NewEncoder(w).Encode([]map[string]any{})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+	togglBaseURL = server.URL + "/api/"
+	openAIBaseURL = server.URL + "/openai"
+	cfg.Forgejo.URL = server.URL
+
+	cmd := fillEmptyDescriptionsCmd()
+	cmd.SetArgs([]string{"--start", "2026-06-01T00:00:00Z", "--end", "2026-06-08T00:00:00Z"})
+	if _, err := captureStdoutWithStdin("y\ny\n", func() error { return cmd.Execute() }); err != nil {
+		t.Fatalf("fill-empty-descriptions returned error: %v", err)
+	}
+	if remoteCalls != 1 {
+		t.Fatalf("git remote resolved %d times, want 1 (hoisted out of the entry loop)", remoteCalls)
+	}
+}
