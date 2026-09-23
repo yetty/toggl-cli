@@ -177,9 +177,20 @@ toggl projects
 
 ---
 
+## Logging
+
+Diagnostic logs are written to syslog with the `toggl` tag (falling back to `/tmp/toggl.log` when syslog is unavailable). Read them with:
+
+```bash
+journalctl -t toggl -f
+```
+
+Logs record startup, configuration load, Toggl and Forgejo request outcomes, split calculation, and split creation failures. Secrets are never logged.
+
 ## Notes
 
 * The CLI uses Toggl REST API v9.
 * Make sure your API token has access to the configured project.
 * The stop command requires Git repositories to exist and be accessible locally.
 * Work logs are stored temporarily and automatically cleaned up after each stop command.
+* Toggl rejects a time entry when `duration` does not exactly equal `stop - start`; the CLI derives both from whole-second values to keep them consistent.

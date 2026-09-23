@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/syslog"
 	"net/http"
 	"net/url"
 	"os"
@@ -161,6 +162,38 @@ var (
 	nowFunc         = time.Now
 )
 
+// --- Logging ---
+
+// logOut is the destination for diagnostic logs. It is nil until initLogging
+// runs (only from main), so tests and library use never emit log noise.
+var logOut io.Writer
+
+// initLogging routes logs to syslog, falling back to a file when syslog is
+// unavailable. Individual command output stays on stdout/stderr; these logs
+// persist separately for debugging.
+func initLogging() {
+	if w, err := syslog.New(syslog.LOG_INFO|syslog.LOG_USER, "toggl"); err == nil {
+		logOut = w
+		return
+	}
+	if f, err := os.OpenFile(filepath.Join(os.TempDir(), "toggl.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		logOut = f
+	}
+}
+
+func logf(format string, args ...interface{}) {
+	if logOut == nil {
+		return
+	}
+	message := fmt.Sprintf(format, args...)
+	if _, ok := logOut.(*syslog.Writer); ok {
+		// syslog adds its own timestamp, host, tag, and pid.
+		fmt.Fprintln(logOut, message)
+		return
+	}
+	fmt.Fprintf(logOut, "%s toggl[%d]: %s\n", time.Now().Format(time.RFC3339), os.Getpid(), message)
+}
+
 // --- Config loading ---
 
 func loadConfig() error {
@@ -215,7 +248,15 @@ func togglRequestChecked(method, path string, body io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("Toggl API error: %s", resp.Status)
+		detail := strings.TrimSpace(string(data))
+		if len(detail) > 300 {
+			detail = detail[:300]
+		}
+		logf("toggl %s %s -> %s %s", method, path, resp.Status, detail)
+		if detail == "" {
+			return nil, fmt.Errorf("Toggl API error: %s", resp.Status)
+		}
+		return nil, fmt.Errorf("Toggl API error: %s: %s", resp.Status, detail)
 	}
 	return data, nil
 }
@@ -250,8 +291,10 @@ Generate a one-line Toggl description.`,
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
+		logf("openai summarize -> %s", resp.Status)
 		return "", fmt.Errorf("OpenAI API error: %s", resp.Status)
 	}
+	logf("openai summarize ok model=%s", cfg.OpenAI.Model)
 	var result struct {
 		Choices []struct {
 			Message struct {
@@ -481,6 +524,8 @@ func forgejoRequest(path string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		detail, _ := io.ReadAll(resp.Body)
+		logf("forgejo GET %s -> %s %s", path, resp.Status, strings.TrimSpace(string(detail)))
 		return nil, fmt.Errorf("Forgejo API error: %s", resp.Status)
 	}
 	return io.ReadAll(resp.Body)
@@ -660,8 +705,10 @@ func collectForgejoActivity(entry TogglTimeEntry) ForgejoActivity {
 	}
 	repos := resolveForgejoRepositories()
 	if len(repos) == 0 {
+		logf("forgejo: no repositories resolved")
 		return ForgejoActivity{}
 	}
+	logf("forgejo: resolved %d repositories", len(repos))
 
 	byName := map[string]ForgejoRepo{}
 	for _, repo := range repos {
@@ -686,16 +733,20 @@ func collectForgejoActivity(entry TogglTimeEntry) ForgejoActivity {
 	}
 	if len(commitFailures) > 0 {
 		fmt.Fprintf(os.Stderr, "Warning: skipping Forgejo commits for %s\n", strings.Join(commitFailures, ", "))
+		logf("forgejo: commit fetch failures: %s", strings.Join(commitFailures, ", "))
 	}
 	if len(commitLines) > 0 {
 		activity.PromptSections = append(activity.PromptSections, "Forgejo commits:\n"+strings.Join(commitLines, "\n\n"))
 	}
+	logf("forgejo: collected %d commit lines, %d split commits", len(commitLines), len(activity.SplitCommits))
 
 	issues, err := fetchForgejoIssues(entry, repos)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: skipping Forgejo issues and pull requests (%v)\n", err)
+		logf("forgejo: issue search failed: %v", err)
 		return activity
 	}
+	logf("forgejo: collected %d issues and pull requests", len(issues))
 
 	var issueLines, pullLines []string
 	for _, item := range issues {
@@ -986,6 +1037,16 @@ func stopEntry(entry *TogglTimeEntry) error {
 }
 
 func createTimeEntry(split ProjectSplit, description string, workspaceID int) (int, error) {
+	// Toggl rejects entries whose duration does not exactly equal stop - start
+	// ("Stop and duration mismatch"). Format and duration must be derived from
+	// the same second-precision values, because split boundaries can carry
+	// sub-second precision from midpoint math and nowFunc().
+	start := split.Start.Truncate(time.Second)
+	stop := split.Stop.Truncate(time.Second)
+	if stop.Before(start) {
+		stop = start
+	}
+
 	reqBody := struct {
 		WorkspaceID int    `json:"workspace_id"`
 		ProjectID   int    `json:"project_id"`
@@ -999,9 +1060,9 @@ func createTimeEntry(split ProjectSplit, description string, workspaceID int) (i
 		ProjectID:   split.ProjectID,
 		Description: description,
 		CreatedWith: "toggl-cli",
-		Start:       split.Start.Format(time.RFC3339),
-		Stop:        split.Stop.Format(time.RFC3339),
-		Duration:    int(split.Duration.Seconds()),
+		Start:       start.Format(time.RFC3339),
+		Stop:        stop.Format(time.RFC3339),
+		Duration:    int(stop.Sub(start).Seconds()),
 	}
 
 	body, _ := json.Marshal(reqBody)
@@ -1354,9 +1415,11 @@ func applyProjectSplits(entry TogglTimeEntry, splits []ProjectSplit, description
 	}
 	entry.Description = firstDescription
 	if err := updateEntryDescription(entry, firstDescription); err != nil {
+		logf("stop: split update failed entry=%d project=%s(%d): %v", entry.ID, first.ProjectName, first.ProjectID, err)
 		return nil, fmt.Errorf("original split update failed for project %s (%d): %w", first.ProjectName, first.ProjectID, err)
 	}
 	splits[0].EntryID = entry.ID
+	logf("stop: split[0] updated entry=%d project=%s(%d) start=%s stop=%s", entry.ID, first.ProjectName, first.ProjectID, first.Start.Format(time.RFC3339), first.Stop.Format(time.RFC3339))
 
 	for i := 1; i < len(splits); i++ {
 		splitDescription := splits[i].Description
@@ -1365,9 +1428,11 @@ func applyProjectSplits(entry TogglTimeEntry, splits []ProjectSplit, description
 		}
 		entryID, err := createTimeEntry(splits[i], splitDescription, workspaceID)
 		if err != nil {
+			logf("stop: split[%d] create failed project=%s(%d) start=%s stop=%s duration=%s: %v", i, splits[i].ProjectName, splits[i].ProjectID, splits[i].Start.Format(time.RFC3339Nano), splits[i].Stop.Format(time.RFC3339Nano), splits[i].Duration, err)
 			return nil, fmt.Errorf("split creation failed for project %s (%d): %w", splits[i].ProjectName, splits[i].ProjectID, err)
 		}
 		splits[i].EntryID = entryID
+		logf("stop: split[%d] created entry=%d project=%s(%d)", i, entryID, splits[i].ProjectName, splits[i].ProjectID)
 	}
 	return splits, nil
 }
@@ -1605,10 +1670,12 @@ func stopCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			logf("stop: current entry id=%d workspace=%d project=%d start=%s", entry.ID, entry.Workspace, entry.Project, entry.Start.Format(time.RFC3339))
 
 			if err := stopEntry(&entry); err != nil {
 				return err
 			}
+			logf("stop: stopped entry id=%d stop=%s", entry.ID, entry.Stop.Format(time.RFC3339Nano))
 
 			var calendarStatus WorkloadStatus
 			var calendarErr error
@@ -1622,11 +1689,13 @@ func stopCmd() *cobra.Command {
 				projectCommits = collectProjectCommits(entry)
 			}
 			worklog := readWorklog()
+			logf("stop: local project commits=%d forgejo split commits=%d worklog=%d bytes", len(projectCommits), len(activity.SplitCommits), len(worklog))
 
 			if len(cfg.Projects) > 0 {
 				combined := dedupeCommits(append(append([]ProjectCommit(nil), projectCommits...), activity.SplitCommits...))
 				mappedCommits := filterMappedCommits(combined)
 				splits := calculateProjectSplits(entry, mappedCommits)
+				logf("stop: combined=%d mapped=%d splits=%d", len(combined), len(mappedCommits), len(splits))
 				if len(splits) > 0 {
 					var ok bool
 					splits, ok = describeProjectSplits(splits, mappedCommits)
@@ -1783,13 +1852,20 @@ func rootCmd() *cobra.Command {
 }
 
 func main() {
+	initLogging()
+	logf("start version=%s args=%v", version, os.Args[1:])
+
 	if err := loadConfig(); err != nil {
+		logf("config load failed: %v", err)
 		fmt.Println("Error loading config:", err)
 		os.Exit(1)
 	}
+	logf("config loaded from %s (forgejo enabled=%t, calendar enabled=%t, projects=%d)", cfgPath, cfg.Forgejo.Enabled(), cfg.Calendar.Enabled(), len(cfg.Projects))
 
 	if err := rootCmd().Execute(); err != nil {
+		logf("command failed: %v", err)
 		fmt.Println("Error:", err)
 		os.Exit(1)
 	}
+	logf("exit ok")
 }

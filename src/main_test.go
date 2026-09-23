@@ -1828,3 +1828,90 @@ func captureStdoutWithStdin(input string, fn func() error) (string, error) {
 	defer func() { os.Stdin = oldStdin }()
 	return captureStdout(fn)
 }
+
+func TestCreateTimeEntryDerivesDurationFromFormattedTimes(t *testing.T) {
+	oldCfg, oldBase := cfg, togglBaseURL
+	defer func() { cfg, togglBaseURL = oldCfg, oldBase }()
+	cfg = Config{}
+
+	var body struct {
+		Start    string `json:"start"`
+		Stop     string `json:"stop"`
+		Duration int    `json:"duration"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		json.NewEncoder(w).Encode(TogglTimeEntry{ID: 5, Workspace: 123})
+	}))
+	defer server.Close()
+	togglBaseURL = server.URL + "/api/"
+
+	start := time.Date(2026, 6, 9, 10, 0, 0, 900_000_000, time.UTC)
+	stop := time.Date(2026, 6, 9, 11, 30, 15, 400_000_000, time.UTC)
+	split := ProjectSplit{ProjectName: "cortex", ProjectID: 219802887, Start: start, Stop: stop, Duration: stop.Sub(start)}
+
+	if _, err := createTimeEntry(split, "desc", 123); err != nil {
+		t.Fatalf("createTimeEntry returned error: %v", err)
+	}
+
+	parsedStart, err := time.Parse(time.RFC3339, body.Start)
+	if err != nil {
+		t.Fatalf("start %q: %v", body.Start, err)
+	}
+	parsedStop, err := time.Parse(time.RFC3339, body.Stop)
+	if err != nil {
+		t.Fatalf("stop %q: %v", body.Stop, err)
+	}
+	if parsedStart.Nanosecond() != 0 || parsedStop.Nanosecond() != 0 {
+		t.Fatalf("timestamps must be whole seconds: start=%s stop=%s", body.Start, body.Stop)
+	}
+	if want := int(parsedStop.Sub(parsedStart).Seconds()); body.Duration != want {
+		t.Fatalf("duration %d does not match stop-start %d (start=%s stop=%s)", body.Duration, want, body.Start, body.Stop)
+	}
+}
+
+func TestTogglRequestCheckedIncludesErrorBody(t *testing.T) {
+	oldBase := togglBaseURL
+	defer func() { togglBaseURL = oldBase }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, "Stop and duration mismatch")
+	}))
+	defer server.Close()
+	togglBaseURL = server.URL + "/api/"
+
+	_, err := togglRequestChecked("POST", "workspaces/1/time_entries", nil)
+	if err == nil {
+		t.Fatal("expected an error for a 400 response")
+	}
+	if !strings.Contains(err.Error(), "Stop and duration mismatch") {
+		t.Fatalf("error = %q, want the response body detail", err.Error())
+	}
+}
+
+func TestLogfWritesToConfiguredWriter(t *testing.T) {
+	oldOut := logOut
+	defer func() { logOut = oldOut }()
+
+	var buf bytes.Buffer
+	logOut = &buf
+	logf("hello %s", "world")
+
+	if !strings.Contains(buf.String(), "hello world") {
+		t.Fatalf("log output = %q, want message", buf.String())
+	}
+}
+
+func TestLogfIsSilentWhenDisabled(t *testing.T) {
+	oldOut := logOut
+	defer func() { logOut = oldOut }()
+	logOut = nil
+
+	logf("must not panic or write anywhere")
+}
